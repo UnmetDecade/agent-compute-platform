@@ -1,0 +1,141 @@
+import { act, renderHook } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  currentLang,
+  detectLang,
+  I18nProvider,
+  storedLang,
+  t,
+  useI18n,
+} from "./i18n";
+
+describe("detectLang", () => {
+  it("uses Chinese for every zh variant", () => {
+    expect(detectLang({ language: "zh-CN", languages: ["zh-CN"] })).toBe("zh");
+    expect(detectLang({ language: "zh-TW", languages: ["zh-TW"] })).toBe("zh");
+    expect(detectLang({ language: "zh", languages: ["zh"] })).toBe("zh");
+  });
+
+  it("uses English for any non-Chinese browser language", () => {
+    expect(detectLang({ language: "en-US", languages: ["en-US"] })).toBe("en");
+    expect(detectLang({ language: "ja-JP", languages: ["ja-JP"] })).toBe("en");
+    expect(detectLang({ language: "de-DE", languages: ["de-DE", "en"] })).toBe("en");
+  });
+
+  it("checks the full languages list, not only the primary language", () => {
+    expect(detectLang({ language: "en-US", languages: ["en-US", "zh-CN"] })).toBe("zh");
+  });
+
+  it("falls back to English when no navigator is available", () => {
+    const original = globalThis.navigator;
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: undefined });
+    try {
+      expect(detectLang()).toBe("en");
+    } finally {
+      Object.defineProperty(globalThis, "navigator", { configurable: true, value: original });
+    }
+  });
+});
+
+describe("storedLang", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("prefers a saved explicit choice", () => {
+    localStorage.setItem("app-lang", "zh");
+    localStorage.setItem("app-lang-explicit", "1");
+    expect(storedLang()).toBe("zh");
+    localStorage.setItem("app-lang", "en");
+    expect(storedLang()).toBe("en");
+  });
+
+  it("ignores an auto-saved value that was not an explicit choice", () => {
+    localStorage.setItem("app-lang", "zh");
+    const original = globalThis.navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { language: "en-US", languages: ["en-US"] },
+    });
+    try {
+      expect(storedLang()).toBe("en");
+    } finally {
+      Object.defineProperty(globalThis, "navigator", { configurable: true, value: original });
+    }
+  });
+
+  it("follows the browser language when nothing is saved", () => {
+    const original = globalThis.navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { language: "zh-CN", languages: ["zh-CN"] },
+    });
+    try {
+      expect(storedLang()).toBe("zh");
+      Object.defineProperty(globalThis, "navigator", {
+        configurable: true,
+        value: { language: "fr-FR", languages: ["fr-FR"] },
+      });
+      expect(storedLang()).toBe("en");
+    } finally {
+      Object.defineProperty(globalThis, "navigator", { configurable: true, value: original });
+    }
+  });
+
+  it("ignores an unknown stored value", () => {
+    localStorage.setItem("app-lang", "klingon");
+    const original = globalThis.navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { language: "zh-CN", languages: ["zh-CN"] },
+    });
+    try {
+      expect(storedLang()).toBe("zh");
+    } finally {
+      Object.defineProperty(globalThis, "navigator", { configurable: true, value: original });
+    }
+  });
+});
+
+describe("t", () => {
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it("switches copy when the language changes", () => {
+    const { result } = renderHook(() => useI18n(), { wrapper: I18nProvider });
+    act(() => result.current.setLang("en"));
+    expect(t("Tasks")).toBe("Tasks");
+    act(() => result.current.setLang("zh"));
+    expect(t("Tasks")).toBe("任务");
+  });
+
+  it("keeps the English source when a translation is missing", () => {
+    const { result } = renderHook(() => useI18n(), { wrapper: I18nProvider });
+    act(() => result.current.setLang("zh"));
+    expect(t("This key has no Chinese translation yet")).toBe(
+      "This key has no Chinese translation yet",
+    );
+  });
+
+  it("substitutes placeholders", () => {
+    const { result } = renderHook(() => useI18n(), { wrapper: I18nProvider });
+    act(() => result.current.setLang("en"));
+    expect(t("Delete {name}? The container and its volumes will be deleted.", { name: "builder-01" })).toBe(
+      "Delete builder-01? The container and its volumes will be deleted.",
+    );
+    act(() => result.current.setLang("zh"));
+    expect(t("Delete {name}? The container and its volumes will be deleted.", { name: "builder-01" })).toBe(
+      "删除 builder-01？容器与数据卷都会被删除。",
+    );
+  });
+
+  it("updates currentLang and the document language", () => {
+    const { result } = renderHook(() => useI18n(), { wrapper: I18nProvider });
+    act(() => result.current.setLang("en"));
+    expect(currentLang()).toBe("en");
+    expect(document.documentElement.lang).toBe("en");
+    act(() => result.current.setLang("zh"));
+    expect(document.documentElement.lang).toBe("zh-CN");
+  });
+});

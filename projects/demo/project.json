@@ -1,0 +1,134 @@
+{
+  "project": "demo",
+  "name": "Demo project",
+  "_comment": [
+    "A complete, generic project definition: roles, the allocation plan the",
+    "operator hands to the scheduler, and which registered builder plays which",
+    "role. Nothing here is specific to a board or a vendor; replace the role",
+    "keys, rule matches and script commands with your own.",
+    "",
+    "Project tree on the host (mounted at /work):",
+    "  /work/demo/repo/       canonical source tree",
+    "  /work/demo/work/<r>/   per-role work trees",
+    "  /work/demo/changes/    change packages (patch + archive + metadata)",
+    "  /work/demo/artifacts/  test output",
+    "",
+    "Apply with: node scripts/platformctl.mjs apply projects/demo/project.json"
+  ],
+  "roles": [
+    {
+      "role_key": "ui-dev",
+      "name": "UI developer",
+      "description": "Edits the UI subtree of the project",
+      "operation_prompt": "Only modify files under the ui/ directory. Sync the work tree first; when done, run the repository's smoke script and describe in your result which UI behaviors changed.",
+      "allowed_paths": ["ui/"],
+      "workdir_template": "/work/{project}/work/{role}"
+    },
+    {
+      "role_key": "driver-dev",
+      "name": "Driver developer",
+      "description": "Edits the driver subtree of the project",
+      "operation_prompt": "Only modify files under the drivers/ directory; do not touch ui/. When done, confirm that it compiles with no obvious memory errors, and describe the changes in your result.",
+      "allowed_paths": ["drivers/"],
+      "workdir_template": "/work/{project}/work/{role}"
+    },
+    {
+      "role_key": "code-review",
+      "name": "Code review",
+      "description": "Applies and reviews change packages, commits the canonical tree",
+      "operation_prompt": "Apply the change packages submitted by the upstream development roles to the main repository, and check for out-of-scope edits or obvious errors; commit once verified, and write the conclusion in your result.",
+      "required_capabilities": ["repo:write"],
+      "allowed_paths": ["repo/", "changes/"],
+      "workdir_template": "/work/{project}/repo"
+    },
+    {
+      "role_key": "test-bench",
+      "name": "Board test",
+      "description": "Runs the project test entry point on the attached board",
+      "operation_prompt": "Run the project's test entry point on the attached board and collect serial logs and artifacts; on failure, extract the key log lines instead of only reporting the failure.",
+      "required_capabilities": ["board:v851s"],
+      "allowed_paths": ["artifacts/"],
+      "workdir_template": "/work/{project}"
+    }
+  ],
+  "plan": {
+    "name": "demo-allocation",
+    "_text_comment": [
+      "text is the natural-language description written for operators; it describes the same allocation as the rules below.",
+      "rules take precedence in the manifest; edit this text in the admin console and save, and the scheduler recompiles it from the new description."
+    ],
+    "text": "Route UI-related requests (category ui, or descriptions mentioning interface, frontend, or page) to ui-dev: first run bash /scripts/sync-worktree.sh to sync the work tree, then run bash /scripts/collect-changes.sh to collect changes when done, with a 30-minute timeout. Afterwards, code-review runs bash /scripts/apply-changes.sh to merge into the main repository, then test-bench runs bash /scripts/run-tests.sh for on-board tests on the attached board.\nRoute driver-related requests (category driver, or descriptions mentioning driver or kernel) to driver-dev, with the same flow as UI and a 60-minute timeout.\nRoute requests without a clear category to ui-dev, then have code-review review and merge them without on-board tests; when unsure, do not assign requests to other roles.",
+    "rules": [
+      {
+        "id": "ui",
+        "priority": 20,
+        "match": { "category": ["ui"], "keywords": ["ui", "interface", "frontend", "page"] },
+        "role": "ui-dev",
+        "build": {
+          "instruction": "Fix the reported UI problem in this project.",
+          "prepare_command": "bash /scripts/sync-worktree.sh",
+          "post_command": "bash /scripts/collect-changes.sh",
+          "timeout_seconds": 1800
+        },
+        "chain": [
+          {
+            "role": "code-review",
+            "build": { "command": "bash /scripts/apply-changes.sh", "mode": "command" }
+          },
+          {
+            "role": "test-bench",
+            "build": { "command": "bash /scripts/run-tests.sh", "mode": "command" },
+            "capabilities": ["board:v851s"]
+          }
+        ]
+      },
+      {
+        "id": "driver",
+        "priority": 20,
+        "match": { "category": ["driver"], "keywords": ["driver", "kernel"] },
+        "role": "driver-dev",
+        "build": {
+          "instruction": "Fix the reported driver problem in this project.",
+          "prepare_command": "bash /scripts/sync-worktree.sh",
+          "post_command": "bash /scripts/collect-changes.sh",
+          "timeout_seconds": 3600
+        },
+        "chain": [
+          {
+            "role": "code-review",
+            "build": { "command": "bash /scripts/apply-changes.sh", "mode": "command" }
+          },
+          {
+            "role": "test-bench",
+            "build": { "command": "bash /scripts/run-tests.sh", "mode": "command" },
+            "capabilities": ["board:v851s"]
+          }
+        ]
+      },
+      {
+        "id": "fallback",
+        "priority": 0,
+        "match": { "any": true },
+        "role": "ui-dev",
+        "build": {
+          "instruction": "Complete the requested change in this project.",
+          "prepare_command": "bash /scripts/sync-worktree.sh",
+          "post_command": "bash /scripts/collect-changes.sh",
+          "timeout_seconds": 1800
+        },
+        "chain": [
+          {
+            "role": "code-review",
+            "build": { "command": "bash /scripts/apply-changes.sh", "mode": "command" }
+          }
+        ]
+      }
+    ]
+  },
+  "assignments": [
+    { "instance_id": "dev-a", "roles": ["ui-dev"] },
+    { "instance_id": "dev-b", "roles": ["driver-dev"] },
+    { "instance_id": "review-a", "roles": ["code-review"] },
+    { "instance_id": "test-a", "roles": ["test-bench"] }
+  ]
+}

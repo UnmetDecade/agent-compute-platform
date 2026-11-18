@@ -1,0 +1,142 @@
+import { t } from "../i18n";
+import { useState } from "react";
+import { db } from "../store";
+import { useLive } from "../live/context";
+import { errorMessage } from "../live/client";
+import { setInstanceProfiles } from "../api";
+import type { Instance, Role } from "../types";
+import { Button, Callout, Field, Modal, Tag } from "../components/ui";
+
+/**
+ * Choose which Agent and APIs an instance uses.
+ * Only the control plane bindings are written; the instance loads Profiles from the new bindings after a restart.
+ */
+export function InstanceProfilesModal({
+  instance,
+  role,
+  onClose,
+}: {
+  instance: Instance;
+  role: Role;
+  onClose: () => void;
+}) {
+  const live = useLive();
+  const agents = db.agents.filter((a) => a.enabled !== false && a.role === role);
+  const apis = db.apis.filter((a) => a.enabled !== false);
+  const [agent, setAgent] = useState(instance.agent_profile_id);
+  const [apiIds, setApiIds] = useState<string[]>(instance.api_profile_ids);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const changed =
+    agent !== instance.agent_profile_id ||
+    apiIds.length !== instance.api_profile_ids.length ||
+    apiIds.some((id) => !instance.api_profile_ids.includes(id));
+
+  function toggleApi(id: string) {
+    setApiIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  async function submit() {
+    setBusy(true);
+    setError("");
+    try {
+      await setInstanceProfiles(
+        instance.host_id,
+        instance.id,
+        agent,
+        role,
+        apiIds,
+        instance.api_profile_ids,
+        live.refresh,
+      );
+      onClose();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal
+      open
+      title={t("Profiles · {name}", { name: instance.name })}
+      onClose={onClose}
+      width={580}
+      footer={
+        <>
+          <Button onClick={onClose}>{t("Cancel")}</Button>
+          <Button variant="primary" onClick={submit} disabled={busy || !changed}>
+            {busy ? t("Saving…") : t("Save")}
+          </Button>
+        </>
+      }
+    >
+      <div className="stack">
+        <Field label="Agent">
+          <div className="role-grid">
+            <button
+              className={`select-card${agent === "" ? " selected" : ""}`}
+              onClick={() => setAgent("")}
+            >
+              <span className="select-head"><b>{t("No Agent")}</b></span>
+              <code>shell</code>
+              <small className="footnote">{t("Runs deterministic shell tasks only; unbinding takes effect after the instance restarts")}</small>
+            </button>
+            {agents.map((a) => (
+              <button
+                key={a.id}
+                className={`select-card${agent === a.id ? " selected" : ""}`}
+                onClick={() => {
+                  setAgent(a.id);
+                  // The Agent's model API must be bound to the instance as well, or the control
+                  // plane refuses the deployment (the Agent would reference an unbound API).
+                  const model = a.model_api_profile_id;
+                  if (model) setApiIds((prev) => (prev.includes(model) ? prev : [...prev, model]));
+                }}
+              >
+                <span className="select-head"><b>{a.name}</b><Tag>v{a.version}</Tag></span>
+                <code>{a.adapter}</code>
+                <small className="footnote">{a.capabilities.join(" · ")}</small>
+              </button>
+            ))}
+          </div>
+          {agents.length === 0 && (
+            <p className="footnote">
+              {t("No {kind} Agent yet; create one on the Profiles page.", {
+                kind: role === "scheduler" ? t("Scheduler") : t("Builder"),
+              })}
+            </p>
+          )}
+        </Field>
+
+        <Field label="API">
+          <div className="role-grid">
+            {apis.map((a) => {
+              const checked = apiIds.includes(a.id);
+              return (
+                <button
+                  key={a.id}
+                  className={`select-card${checked ? " selected" : ""}`}
+                  onClick={() => toggleApi(a.id)}
+                >
+                  <span className="select-head"><b>{a.name}</b><Tag>{a.kind}</Tag></span>
+                  <code>{a.base_url}</code>
+                  <small className="footnote">
+                    {a.scopes.length > 0 ? a.scopes.join(" · ") : a.auth_type}
+                  </small>
+                </button>
+              );
+            })}
+          </div>
+          {apis.length === 0 && (
+            <p className="footnote">{t("No API available; create one on the Profiles page first.")}</p>
+          )}
+        </Field>
+
+        {error && <Callout tone="bad">{error}</Callout>}
+      </div>
+    </Modal>
+  );
+}

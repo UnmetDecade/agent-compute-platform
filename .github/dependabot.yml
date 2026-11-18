@@ -1,0 +1,80 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /scheduler
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # Keep Node type definitions on the CI runtime's major (Node 22).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /pcs-issuer
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # Keep Node type definitions on the CI runtime's major (Node 22).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /host-runtime
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # Keep Node type definitions on the CI runtime's major (Node 22).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /secret-store
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # Keep Node type definitions on the CI runtime's major (Node 22).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /admin-app
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # Keep Node type definitions on the CI runtime's major (Node 22).
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]

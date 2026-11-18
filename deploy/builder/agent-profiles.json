@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "Static Agent Profile file for deployments without PCS.",
+    "Mount it read-only and set PROFILES_FILE=/opt/platform/agent-profiles.json on builders.",
+    "The model credential comes from the container environment (ANTHROPIC_API_KEY /",
+    "ANTHROPIC_BASE_URL, passed through PLATFORM_AGENT_PASS_ENV and cli-agent --pass-env),",
+    "so no api_profiles entry or secret_ref is needed here.",
+    "With PCS in the deployment, leave PROFILES_FILE unset: PCS exports the runtime view instead."
+  ],
+  "agent_profiles": [
+    {
+      "agent_profile_id": "agp_builder",
+      "role_id": "builder",
+      "name": "Claude Code",
+      "version": "2.1.322",
+      "adapter": "stdio-jsonrpc",
+      "entrypoint": ["node", "/opt/platform/agents/cli-agent.mjs"],
+      "args": [
+        "--provider", "claude",
+        "--extra-arg", "--dangerously-skip-permissions",
+        "--pass-env", "ANTHROPIC_API_KEY",
+        "--pass-env", "ANTHROPIC_BASE_URL"
+      ],
+      "limits": { "max_wall_seconds": 1800, "max_turns": 80 },
+      "capabilities": ["code.build", "shell", "llm"],
+      "allowed_tools": [],
+      "task_types": ["task.build"],
+      "enabled": true
+    }
+  ],
+  "api_profiles": [],
+  "bindings": {}
+}

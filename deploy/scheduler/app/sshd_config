@@ -1,0 +1,11 @@
+# Scheduler container SSH: full permissions, root + public key.
+Port 22
+PermitRootLogin yes
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+AllowTcpForwarding yes
+X11Forwarding yes
+ClientAliveInterval 30
+ClientAliveCountMax 6
+UsePAM yes

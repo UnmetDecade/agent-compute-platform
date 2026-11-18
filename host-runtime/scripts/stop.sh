@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Graceful stop (SIGTERM → drain); add --force to kill -9 directly and simulate a crash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+force=""
+[[ "${1:-}" == "--force" ]] && { force=1; shift; }
+
+for id in "$@"; do
+  pidfile="$DIR/run/$id.pid"
+  if [[ ! -f "$pidfile" ]]; then echo "$id is not running"; continue; fi
+  pid="$(cat "$pidfile")"
+  if [[ -n "$force" ]]; then
+    kill -9 "$pid" 2>/dev/null && echo "$id killed with SIGKILL (simulated crash)"
+  else
+    kill "$pid" 2>/dev/null && echo "$id received SIGTERM; draining"
+  fi
+  rm -f "$pidfile"
+done

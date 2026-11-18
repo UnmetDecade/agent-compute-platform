@@ -1,0 +1,278 @@
+# Single-host deployment of the role-based variant.
+#
+#   scheduler + PostgreSQL + four GENERIC builders.
+#
+# The builders have no business role baked in. The operator creates roles, assigns
+# them to instances, publishes an allocation plan, and the scheduler routes each
+# request by the plan's rules (see scripts/platformctl.mjs).
+#
+# Every builder mounts the same project tree at /work. BUILDER_PROJECT_ROOTS=/work
+# lets a role's workdir_template address a subtree of it (/work/<project>/<role>).
+#
+#   export DEEPSEEK_API_KEY=...
+#   scripts/roles.sh up
+#   node scripts/platformctl.mjs apply projects/demo/project.json
+#
+# The admin app (roles, plans, builders, tasks) is served by `web` on
+# 127.0.0.1:${UI_PORT:-18080}; `pcs` supplies login/accounts and the
+# /api/scheduler proxy. Without PCS the UI cannot log in, so the variant's CLI
+# (scripts/platformctl.mjs) remains usable when only scheduler+builders run.
+#
+# Ports are published on loopback only.
+
+name: platform-roles
+
+x-builder-env: &builder-env
+  SCHEDULER_URL: http://scheduler:8443
+  ROLE_ID: builder
+  HOST_ID: ${HOST_ID:-docker-host-01}
+  AGENT_PROFILE_ID: ${BUILDER_AGENT_PROFILE_ID:-agp_builder}
+  INSTANCE_TOKEN_DIR: /opt/platform/tokens
+  MAX_CONCURRENCY: ${BUILDER_CONCURRENCY:-1}
+  CLAIM_INTERVAL_SECONDS: ${CLAIM_INTERVAL_SECONDS:-0.5}
+  SSH_ENABLED: "0"
+  # Containers are addressed by service name; the agent CLI needs no proxy.
+  BUILDER_PROJECT_ROOTS: /work
+  # Without PCS, the static profile file below supplies the Agent Profile.
+  PROFILES_FILE: /opt/platform/agent-profiles.json
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  ANTHROPIC_API_KEY: ${DEEPSEEK_API_KEY:-}
+  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}
+  PLATFORM_AGENT_PASS_ENV: ANTHROPIC_API_KEY,ANTHROPIC_BASE_URL,DEEPSEEK_API_KEY
+
+x-builder: &builder
+  image: platform/builder:roles
+  restart: unless-stopped
+  depends_on:
+    scheduler:
+      condition: service_healthy
+  volumes:
+    - ${PLATFORM_ROOT:-/opt/platform}/projects:/work
+    - ${PLATFORM_ROOT:-/opt/platform}/scripts:/scripts:ro
+    - ./builder/agent-profiles.json:/opt/platform/agent-profiles.json:ro
+  cpus: ${BUILDER_CPUS:-1}
+  mem_limit: ${BUILDER_MEM:-3g}
+  pids_limit: 1024
+  networks: [roles-net]
+
+services:
+  postgres:
+    image: ${PG_REGISTRY:-}postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: platform
+      POSTGRES_DB: platform_control
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env.roles}
+    volumes:
+      - roles-postgres:/var/lib/postgresql/data
+      - ./roles-initdb.sql:/docker-entrypoint-initdb.d/01-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform_control"]
+      interval: 5s
+      retries: 20
+    networks: [roles-net]
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: deploy/scheduler/Dockerfile
+      args:
+        REGISTRY: ${REGISTRY:-}
+        APT_MIRROR: ${APT_MIRROR:-}
+    image: platform/scheduler:roles
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://platform:${POSTGRES_PASSWORD}@postgres:5432/scheduler
+      HOST: 0.0.0.0
+      PORT: "8443"
+      # The seed creates the execution roles (scheduler/builder), task definitions
+      # and agent profile references. Business roles are never seeded.
+      SEED: "1"
+      ARTIFACT_DIR: /opt/platform/artifacts
+      SSH_ENABLED: "0"
+      SCHEDULER_INSTANCE_ID: scheduler
+      SCHEDULER_AGENT_PROFILE_ID: ${SCHEDULER_AGENT_PROFILE_ID:-agp_scheduler}
+      SCHEDULER_HOST_ID: ${HOST_ID:-docker-host-01}
+      HOST_CPUS: ${HOST_CPUS:-4}
+      HOST_MEM_BYTES: ${HOST_MEM_BYTES:-8589934592}
+      CLAIM_INTERVAL_SECONDS: ${CLAIM_INTERVAL_SECONDS:-0.5}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      ANTHROPIC_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # The plan compiler turns the operator's prose into rules once, on save.
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.deepseek.com/anthropic}
+      PLAN_COMPILER_MODEL: ${PLAN_COMPILER_MODEL:-deepseek-chat}
+      PLATFORM_AGENT_PASS_ENV: ANTHROPIC_API_KEY,ANTHROPIC_BASE_URL,DEEPSEEK_API_KEY
+    ports:
+      - "127.0.0.1:${SCHEDULER_PORT:-18443}:8443"
+    volumes:
+      - roles-artifacts:/opt/platform/artifacts
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8443/healthz || exit 1"]
+      interval: 10s
+      retries: 12
+    networks: [roles-net]
+
+  # Control plane: accounts, host roster and the /api/scheduler proxy the admin
+  # app uses. It does not manage these scheduler/builder containers (no
+  # host-runtime here); PCS_SCHEDULER_URL points it at the scheduler directly.
+  pcs:
+    build:
+      context: ..
+      dockerfile: deploy/pcs/Dockerfile
+      args:
+        REGISTRY: ${REGISTRY:-}
+    image: platform/pcs:roles
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      scheduler:
+        condition: service_healthy
+    environment:
+      PCS_HOST: 0.0.0.0
+      PCS_PORT: "7901"
+      PCS_DATABASE_URL: postgres://platform:${POSTGRES_PASSWORD}@postgres:5432/platform_control
+      # No deployment row owns this scheduler; PCS uses this address for its
+      # /api/scheduler proxy and for anything that resolves the default scheduler.
+      PCS_SCHEDULER_URL: http://scheduler:8443
+      PCS_ADMIN_ORIGINS: http://127.0.0.1:${UI_PORT:-18080},http://localhost:${UI_PORT:-18080}
+      PCS_REGISTRATION: closed
+      PCS_SESSION_HOURS: ${PCS_SESSION_HOURS:-24}
+      ADMIN_TOKEN_FILE: /run/platform/admin-token
+      ADMIN_TOKEN_HOURS: ${ADMIN_TOKEN_HOURS:-720}
+      # First login for a deployment that is not the demo storyline. Idempotent;
+      # an existing account is never changed.
+      PCS_SEED_ADMIN_USERNAME: ${PCS_ADMIN_USER:-admin}
+      PCS_SEED_ADMIN_PASSWORD: ${PCS_ADMIN_PASSWORD:?set PCS_ADMIN_PASSWORD in deploy/.env.roles}
+    volumes:
+      - roles-pcs-keys:/app/keys
+      - roles-pcs-run:/run/platform
+    healthcheck:
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:7901/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      retries: 12
+    networks: [roles-net]
+
+  # Static admin app plus same-origin proxies to PCS and the scheduler.
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/web/Dockerfile
+      args:
+        REGISTRY: ${REGISTRY:-}
+    image: platform/web:roles
+    restart: unless-stopped
+    depends_on:
+      pcs:
+        condition: service_started
+      scheduler:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${UI_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null || exit 1"]
+      interval: 10s
+      retries: 12
+    networks: [roles-net]
+
+  # The seed leaves three demo builders ONLINE although no process owns them.
+  # They can never take a role task (no assignment), but an idle placeholder in
+  # the instance list is misleading; mark them OFFLINE once.
+  seed-placeholders:
+    image: ${PG_REGISTRY:-}postgres:16-alpine
+    depends_on:
+      scheduler:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        psql -h postgres -U platform -d scheduler -v ON_ERROR_STOP=1 -c \
+          "UPDATE role_instances SET state='OFFLINE', updated_at=app_now()
+            WHERE instance_id IN ('builder-ubuntu20-a','builder-ubuntu22-a','builder-ubuntu24-a')"
+    restart: "no"
+    networks: [roles-net]
+
+  dev-a:
+    <<: *builder
+    build:
+      context: ..
+      dockerfile: deploy/builder/Dockerfile
+      args:
+        UBUNTU_VERSION: "22.04"
+        REGISTRY: ${REGISTRY:-}
+        APT_MIRROR: ${APT_MIRROR:-}
+    hostname: dev-a
+    environment:
+      <<: *builder-env
+      INSTANCE_ID: dev-a
+      BUILDER_CAPABILITIES: repo:read
+    volumes:
+      - ${PLATFORM_ROOT:-/opt/platform}/projects:/work
+      - ${PLATFORM_ROOT:-/opt/platform}/scripts:/scripts:ro
+      - ./builder/agent-profiles.json:/opt/platform/agent-profiles.json:ro
+      - dev-a-ws:/opt/platform/workspace
+
+  dev-b:
+    <<: *builder
+    hostname: dev-b
+    environment:
+      <<: *builder-env
+      INSTANCE_ID: dev-b
+      BUILDER_CAPABILITIES: repo:read
+    volumes:
+      - ${PLATFORM_ROOT:-/opt/platform}/projects:/work
+      - ${PLATFORM_ROOT:-/opt/platform}/scripts:/scripts:ro
+      - ./builder/agent-profiles.json:/opt/platform/agent-profiles.json:ro
+      - dev-b-ws:/opt/platform/workspace
+
+  review-a:
+    <<: *builder
+    hostname: review-a
+    environment:
+      <<: *builder-env
+      INSTANCE_ID: review-a
+      # Required by the code-review role; assignment is refused without it.
+      BUILDER_CAPABILITIES: repo:write
+    volumes:
+      - ${PLATFORM_ROOT:-/opt/platform}/projects:/work
+      - ${PLATFORM_ROOT:-/opt/platform}/scripts:/scripts:ro
+      - ./builder/agent-profiles.json:/opt/platform/agent-profiles.json:ro
+      - review-a-ws:/opt/platform/workspace
+
+  test-a:
+    <<: *builder
+    hostname: test-a
+    environment:
+      <<: *builder-env
+      INSTANCE_ID: test-a
+      # Tag that the test-bench role requires; swap for the board you actually attach.
+      BUILDER_CAPABILITIES: board:v851s
+    volumes:
+      - ${PLATFORM_ROOT:-/opt/platform}/projects:/work
+      - ${PLATFORM_ROOT:-/opt/platform}/scripts:/scripts:ro
+      - ./builder/agent-profiles.json:/opt/platform/agent-profiles.json:ro
+      - test-a-ws:/opt/platform/workspace
+    # Board access is host-specific and deliberately absent by default. On a host
+    # with the board attached, add:
+    #   devices: ["/dev/ttyUSB0:/dev/ttyUSB0"]
+    #   group_add: ["dialout"]
+
+volumes:
+  roles-postgres:
+  roles-artifacts:
+  roles-pcs-keys:
+  roles-pcs-run:
+  dev-a-ws:
+  dev-b-ws:
+  review-a-ws:
+  test-a-ws:
+
+networks:
+  roles-net:
+    driver: bridge

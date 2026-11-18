@@ -1,0 +1,19 @@
+{
+  "name": "host-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Host Runtime (role-agent side): enrollment, heartbeat, claims, local second-level admission, lease renewal, result reporting",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "dev": "tsx watch src/main.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^7.0.2"
+  }
+}

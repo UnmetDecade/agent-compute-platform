@@ -1,0 +1,309 @@
+<div align="center">
+
+# Intelligent Task Scheduling System
+
+**Run Claude Code, Codex, DeepSeek or plain shell on any number of hosts — with deterministic scheduling, recursive schedulers, generic builders and allocation by operator-defined business role.**
+
+[Deploy](#deploy) · [Architecture](#architecture) · [Example](#example-project-architecture) · [Scheduling](#scheduling-algorithm) · [Screenshots](#product-tour) · [Docs](#documentation) · **[Chinese](README.zh-CN.md)**
+
+![Version](https://img.shields.io/badge/version-4.7.0-6f5bd3)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+![Node](https://img.shields.io/badge/Node-22-339933?logo=node.js&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-24+-2496ED?logo=docker&logoColor=white)
+
+</div>
+
+---
+
+AI coding agents are easy to start and hard to operate across machines. The **Intelligent Task Scheduling System (ITSS)** keeps the operational core **boring and deterministic**: a scheduler decides, a generic builder executes, and an Agent only explains.
+
+The operator defines the **business roles** that do the work and writes the **allocation plan** as one prose document. ITSS compiles that plan **once on save** (with `POST /v1/plans/compile` available for preview) and matches every later request against the stored rules — never by asking a model at request time. All builders share one work tree, so the scheduler enforces **folder exclusion at claim time**: a workdir already held by another live lease is refused with `WORKDIR_IN_USE`.
+
+It is built for a small R&D team that wants a real compute floor — not a multi-tenant SaaS, not a Kubernetes distribution, and not another approval workflow.
+
+<img src="docs/assets/dashboard-en.png#gh-light-mode-only" alt="Overview — AI Agent Studio" width="100%">
+<img src="docs/assets/dashboard-en-dark.png#gh-dark-mode-only" alt="Overview — AI Agent Studio (dark)" width="100%">
+
+## Why this exists
+
+| | |
+|---|---|
+| **Deterministic dispatch** | Queue order, admission, leases and fencing are plain rules in PostgreSQL. The LLM never decides who runs what. |
+| **Recursive schedulers** | Every host has one root scheduler; node schedulers recurse underneath it, each with its own database and its own builders. |
+| **Host federation** | A host can merge into another host. Its root becomes a node in the parent's view, `ΣW` aggregates up the tree, and detaching changes one reference — no container restarts. |
+| **Builders are machines** | A builder is an official Ubuntu container (or a bare-metal host) with root SSH, your own toolchain and a real shell. No fake sandbox. |
+| **Agent-agnostic** | Claude Code, Codex, DeepSeek or a custom CLI/HTTP agent. Profiles hold only references; secrets are resolved at run time. |
+| **Chat and terminal are tasks** | Conversations and container shells use the same task pipeline, lease and fencing — no side channel, no special-case executor. |
+| **Files in both directions** | Input attachments are written into the workspace before a command runs; collected outputs go through a dedicated artifact channel (64 MiB per file, SHA-256 verified) and download byte-for-byte. No base64 in stdout. |
+| **LAN devices, same pipeline** | A sideload token lets one device drive one host's builders with `curl` — the same task, lease and fencing path as the console, with a closed permission set and no scheduler address exposed. |
+
+## Architecture
+
+<a href="docs/architecture.md">
+  <img src="docs/assets/architecture-en.png" alt="Platform architecture — PCS control plane, host-runtime, recursive schedulers, sideload channel and cross-scheduler relay" width="100%">
+</a>
+
+<p align="center"><sub>Click the diagram to open the architecture documentation.</sub></p>
+
+Four moving parts:
+
+- **PCS** is the control plane. It owns the host registry, deployment plans, Agent/API profiles, Secret Store references and audit. It writes desired state and signed commands — it never calls Docker directly.
+- **host-runtime** runs on every host. It long-polls PCS, verifies Ed25519 commands, creates containers, reports actual state and resources. Outbound only.
+- **Scheduler** is the state authority. It queues, admits, leases, fences, dispatches and records. Root and node schedulers form a recursive tree; cross-scheduler work is pushed down, never copied.
+- **Builder** is the only worker role. It claims tasks, runs an Agent adapter or a deterministic shell, streams progress and uploads artifacts.
+
+A sideload is not a fifth moving part: it is a scoped token that enters through PCS and lands on the host's root scheduler, so a LAN device uses the same task path as the console. Files travel with the task — attachments in, collected artifacts out.
+
+The full model — including `W` (capability score), `D` (task difficulty), `ΣW` aggregation and relay depth — is in [docs/architecture.md](docs/architecture.md) and the local interactive diagrams under [`docs/`](docs/).
+
+## Example project architecture
+
+<a href="docs/example-project-architecture.html">
+  <img src="docs/assets/example-architecture-en.png" alt="Example project architecture — one scheduler and N development machines built in, with developers, testers, CI and other systems connected through sideload tokens" width="100%">
+</a>
+
+<p align="center"><sub>One scheduler and N development machines are built in; every other participant enters through a sideload token. Click to open the interactive HTML version.</sub></p>
+
+A concrete shape you can run today:
+
+- **Multi-machine R&D automation** — one scheduler plus N development machines. Add capacity by adding a development machine, not a new role.
+- **Agent-driven delivery** — developers and testers submit tasks from the admin app or `curl`; Claude Code / Codex / DeepSeek / shell run inside the bound Agent Profile.
+- **CI and test automation** — a CI job submits tasks, polls status and downloads artifacts with a scoped `sdl_…` token, without installing an agent.
+- **Support and customer intake** — support staff or customer scripts submit tasks and read results; they never learn the scheduler address.
+- **Files in both directions** — attachments in, artifacts out, SHA-256 verified and returned byte-for-byte.
+
+Only the scheduler and development machines are built in. Everyone else is a sideload client, so the same task, lease, fencing and audit path applies to every participant — no new container, role or dispatch rule.
+
+## Allocation by business role
+
+ITSS keeps the execution roles (scheduler, builder) and adds a second dimension of **business roles** (`ui-dev`, `code-review`, `test-bench`, …) that the operator defines and assigns. A builder starts with no business role; the operator assigns it at runtime.
+
+- **Write the plan in plain language; matching stays deterministic** — each role gets one free-text note on how to do its work, and the whole allocation plan is a single prose box ("which requests go to whom, then to whom, what to refuse"). On save the scheduler compiles it **once** into rules and shows them for confirmation; every later request matches the stored rules (priority → specificity → declaration order), so the same request always routes the same way. No LLM infers routing at request time.
+- **Builders stay generic** — one image can serve any role. The role definition decides the capabilities, allowed paths and workdir, and only a builder assigned that role can claim the task.
+- **The chain advances itself** — rules declare a `chain`, which compiles into workflow stages at activation; when a stage succeeds the next task is created, with work handed over as a change package or artifacts.
+- **The scheduler owns folder exclusion** — all builders share one work tree, so every claim goes through the scheduler; if another live lease already holds that folder, the claim is refused with who holds it, and released when the holder finishes.
+- **Deterministic stage hooks** — `prepare_command` / `post_command` run via `/bin/sh -lc` inside the role's workdir to sync the baseline, collect changes and run tests, independent of what the agent chooses to do.
+
+Bring up a single-host environment with `scripts/roles.sh up`, then `node scripts/platformctl.mjs apply projects/demo/project.json` to upsert roles, activate the plan and assign machines. The admin app (`http://127.0.0.1:18080`) has **Business roles** and **Plans** pages that do the same: a role needs only project, display name, description and an operation note; the plan page is one text box that the scheduler compiles on save, showing the rules it will run for you to activate. Full reference: [Allocation by business role](docs/role-allocation.md).
+
+## Exposure: keep the admin surface private
+
+The admin app, PCS (7901), the scheduler API (8443) and container SSH ports are the **trusted control plane**. Bind them to loopback, your LAN or a VPN — **never publish the admin app's port to the public internet**, even with authentication in front of it.
+
+When something outside the trusted network needs to run work, issue a **sideload token** instead (studio → Attach sideload). A sideload is scoped to one host, has a closed permission set (`tasks:read`, `tasks:write`, `queue:read`, `builders:read`, `console:run`), is revocable, and never learns the scheduler address. It reaches the same task, lease, fencing and audit path as the console.
+
+If remote operators really must reach the console, put it behind a TLS reverse proxy **and** a VPN or an authenticated gateway, and treat that gateway — not the app itself — as the security boundary. See [SECURITY.md](SECURITY.md) for the full deployment checklist.
+
+## Product tour
+
+<img src="docs/assets/studio-en.gif" alt="Animated AI Agent Studio — task signals flowing along live scheduler links" width="100%">
+
+<p align="center"><sub>Live studio: new builders appear under their parent, and signals flow along every active link.</sub></p>
+
+<p align="center">
+  <img src="docs/assets/hosts-en.png" alt="Hosts page" width="48%">
+  <img src="docs/assets/tasks-en.png" alt="Tasks page" width="48%">
+</p>
+
+<p align="center"><sub>Left: hosts &amp; federation · Right: tasks &amp; leases</sub></p>
+
+The studio is the main screen: root scheduler on top, node schedulers and builders below, with animated signals on every live link. Each card carries its host, resource envelope and capability score. The same tree is used to add a builder or another scheduler — the card you click already determines the parent.
+
+## Deploy
+
+> **Want to see it first?** `scripts/demo.sh` starts a self-contained demo — PostgreSQL + PCS + scheduler + the example-project storyline and this UI — at `http://127.0.0.1:18080`. Sign in with **admin / admin** (demo-only credentials). The demo is not a deployment path; it exists to show the product quickly.
+>
+> ```bash
+> scripts/demo.sh --down            # stop the containers, keep the data
+> scripts/demo.sh --down --volumes  # stop and delete the demo data
+> ```
+
+Requirements: Node 22+ and Docker (for PostgreSQL and the host cache). On Debian/Ubuntu, Fedora and macOS with Homebrew the script installs missing prerequisites (sudo may prompt; on macOS it may install colima and start a VM). Set `PLATFORM_AUTO_INSTALL=0` to disable. One machine is enough.
+
+| Host | Installed automatically | You install manually |
+|---|---|---|
+| Debian / Ubuntu | Node 22, Docker, Compose v2 | — |
+| Fedora / RHEL | Node 22, Docker (dnf) | Compose v2 if the repository lacks it |
+| macOS + Homebrew | Node 22, Docker (starts Docker Desktop, or installs colima) | Docker Desktop licence / first-run setup if used |
+| macOS without Homebrew | — | Node 22, Docker Desktop or colima |
+| Other Linux | Node 22 (official tarball) | Docker + Compose v2 |
+| Windows | — | Run under WSL2 and follow the Ubuntu row |
+
+```bash
+scripts/deploy.sh
+```
+
+The script is idempotent. It starts a local PostgreSQL container, generates the PCS signing keys and the SSH credential key, builds the admin app and the deployment payload, prepares the host cache, migrates the database, and starts PCS — which serves the UI itself.
+
+Then open `http://127.0.0.1:7901`:
+
+1. **Register the first account** — it becomes the administrator; later registrations wait for approval.
+2. **Add this machine as a local host** and start its runtime.
+3. **Deploy a scheduler, then builders** — all from the UI.
+
+PCS runs in the foreground; Ctrl+C stops it and the PostgreSQL container keeps running (stop it with `docker stop osacp-postgres`; the container keeps its legacy name). For remote hosts, start it with `PCS_HOST=0.0.0.0 PCS_RUNTIME_URL=http://<lan-ip>:7901` and add them over SSH.
+
+Accounts are enforced by PCS: scrypt password hashes, HttpOnly sessions with CSRF protection, role presets plus custom scopes, and an audit log attributed to the signed-in account. Passwords must be longer than 8 characters and include an uppercase letter, a lowercase letter and a symbol. `PCS_REGISTRATION=approval|open|closed` controls later sign-ups and `PCS_SESSION_HOURS` sets the session lifetime. The CLI token remains available for automation:
+
+```bash
+npm --prefix pcs-issuer run pcs -- admin-token --operator <name>
+```
+
+### Access from other systems
+
+Sideload is an access method, not a deployment path: create a token in the studio (**Attach sideload**) and let one device drive one host's builders with `curl` or a script. It is scoped to that host, revocable, and never learns the scheduler address.
+
+```bash
+SIDELOAD_TOKEN='sdl_…' PCS_URL='http://pcs.example:7901' \
+  node scripts/sideload-project.mjs --out ./out \
+  --upload ./input/data.csv \
+  --command 'g++ -O2 -std=c++17 hello.cpp -o hello && ./hello > result.txt' \
+  --collect .
+```
+
+Inputs are materialized under `attachments/` before the command runs; every file under the collected paths is downloaded into `--out` and checked against the scheduler's SHA-256.
+
+## Core model
+
+| Concept | How it works |
+|---|---|
+| **Root / node scheduler** | One root per host, any number of node schedulers underneath. A node owns its own builders and database; it never schedules another node's builders directly. |
+| **Capability `W`** | CPU cores, frequency, memory, disk, model and API capability are normalized to 0–1000. Static mode freezes `W` at deploy time; dynamic mode keeps the load-dependent half live (`W_static + H_res × W_res`). |
+| **Task difficulty `D`** | Supplied at submission. A builder is eligible only when `W ≥ D` and its capability subset matches. |
+| **`ΣW`** | A scheduler reports the sum of its subtree's online builders. The root sees the whole federation's capacity. |
+| **Leases + fencing** | Every claim creates an attempt with a lease token and fencing token. A stale writer gets `409 FENCING_STALE`. |
+| **Profiles** | PCS stores Agent/API profiles and bindings. The scheduler only sees `profile_id` references, never keys. |
+| **Secret Store** | Profiles hold `secret://` refs. The store resolves them per instance into short-lived credentials; audit never records values. |
+| **Relay** | A task with `D > W` is pushed to a child scheduler, never copied. Results bubble back up the chain; max depth 8. |
+| **Files** | `requirements.console.attachments` are written under `<workspace>/attachments/` before the command runs. `collect` walks the workspace (32 paths / 128 files, 64 MiB each, 256 MiB total) and every file goes through the artifact channel with a fresh SHA-256. |
+| **Sideload** | A `sdl_` token is bound to one host, stored as a SHA-256 hash plus its last four characters. Scopes are a closed set; `console:run` gates shell tasks. Calls go `device → PCS → root scheduler`. |
+
+## Scheduling algorithm
+
+Two modes, one contract. **Static** gives every deployment a fixed budget and freezes its capability score. **Dynamic** gives every host a cgroup pool and recomputes per-instance fair-share grants every 5 seconds. The mode is chosen once on the root scheduler and inherited by every node and builder underneath. Both paths use the same queue, lease, fencing and relay code, and every decision is integer arithmetic over PostgreSQL rows — no LLM, no randomness, no floating point in the hot path.
+
+### Capability score
+
+```
+W = 1000 × ( 0.30·cpu/8 + 0.15·freq/4 + 0.20·mem/32
+           + 0.10·disk/256 + 0.15·model/10 + 0.10·api/10 )        (each term capped at 1)
+```
+
+Dynamic mode splits the score into a load-independent half and a load-dependent half:
+
+```
+W_static = 1000 × (0.15·freq/4 + 0.10·disk/256 + 0.15·model/10 + 0.10·api/10)   ∈ [0, 500]
+W_res    = 1000 × (0.30·cpu/8 + 0.20·mem/32)                                    ∈ [0, 500]
+W0       = W_static + W_res(cap)                  -- ceiling
+W_live   = W_static + H_res × W_res(cap)          -- live
+H_res    = clamp(1 − max(U_mem, U_cpu), 0.05, 1)  -- usage, EWMA α = 0.3
+W_dispatch = P25(W_live over the last 15 s)       -- what dispatch uses
+```
+
+Committed-but-unused grants do not lower `W_live`; they lower admission budgets instead. Scheduling therefore never penalises a builder twice for the same allocation.
+
+### Weighted max-min water filling
+
+Each instance demands `demand = min(cap, max(reserved, used, idle_floor))`, so reserved, actual and floor are reconciled before anything is shared. Weights come from declared caps, and the allocator fills toward demand proportionally to weight, integer-only and stable:
+
+```
+g_i = min(demand_i, cap_i, floor)
+while capacity remains and some g_i < min(demand_i, cap_i):
+    give each instance min(room_i, ⌊remaining × weight_i / Σweight⌋)
+remainder → one millicore / one byte at a time, by instance_id
+```
+
+Unused capacity is never forced out; identical inputs produce identical grants; CPU and memory are filled independently. Grants map to `memory.low` / `cpu.weight`, caps to `memory.max` / `cpu.max`, and under pressure `memory.high` is squeezed to `1.1 × grant` (`PRESSURE`) or `1.0 × grant` (`CRITICAL`). An instance whose grant falls below what it has committed becomes `OVERCOMMITTED`: it keeps running, but takes no new work.
+
+### Concurrency per task type
+
+```
+k(i, τ) = min( ⌊(budget_cpu − reserved_cpu) / request_cpu(τ)⌋,
+               ⌊(budget_mem − reserved_mem) / request_mem(τ)⌋ )
+budget = min(cap, max(grant, fair_share))
+admit only if k ≥ 1 and active_of_type(τ) < task_type_instance_limit
+```
+
+`k` can be 0, which means the builder cannot take that task type at all. Dynamic builders start work only after their grant reaches `APPLIED` for the current generation, so nothing runs without an enforced cap.
+
+### Pressure and load shedding
+
+The pool moves through `NORMAL → BUSY → PRESSURE → CRITICAL → RECOVERING → NORMAL` with separate enter and exit thresholds (0.70/0.85/0.95 in, 0.60/0.75/0.90 out), so it cannot flap. New claims are accepted only in `NORMAL`, `BUSY` and `RECOVERING`; `PRESSURE` and `CRITICAL` halt admission rather than kill work. Nothing is ever OOM-killed to reclaim memory.
+
+### Queue discipline
+
+```
+effective_priority = priority_class − ⌊waited / aging_after⌋      (P0 never ages)
+ORDER BY effective_priority, enqueued_at, task_id
+```
+
+Each claim scans up to 20 ordered candidates instead of `LIMIT 1`, durably records why a candidate was blocked, and retries it with exponential backoff (1 s doubling to a 60 s cap). A task whose request can never fit is marked `UNSCHEDULABLE` after 8 attempts instead of churning. Relay picks the **smallest sufficient** child when `D > 0` and the idlest one when `D = 0`, preferring same-mode children and admission-friendly pressure states, to a maximum depth of 8.
+
+Full derivations, worked examples, the grant lifecycle and the configuration table — including which policy fields are still reserved — are in [docs/scheduling-algorithm.md](docs/scheduling-algorithm.md).
+
+## Repository layout
+
+| Path | Responsibility |
+|---|---|
+| [`scheduler/`](scheduler/) | Task state machine, queue, leases, fencing, events, federation relay |
+| [`pcs-issuer/`](pcs-issuer/) | PCS control plane: hosts, deployment plans, signed commands, profiles, audit |
+| [`host-runtime/`](host-runtime/) | Host daemon: enroll, verify, create containers, report resources |
+| [`admin-app/`](admin-app/) | React 19 + Vite console: overview, hosts, builders, schedulers, profiles, tasks, terminal, chat, logs |
+| [`secret-store/`](secret-store/) | Reference Secret Store with per-instance resolution |
+| [`agents/`](agents/) | CLI Agent adapter for Claude Code / Codex / custom CLIs |
+| [`deploy/`](deploy/) | Single-machine Compose, container entrypoints, payload build |
+| [`docs/`](docs/) | Architecture, scheduling algorithm, builders, scheduler, admin app, sideload, federation, deployment |
+| [`scripts/`](scripts/) | Acceptance, load, backup, PKI, payload and sideload scripts |
+
+## Security model
+
+This is a **trusted-network R&D platform**, and the trade-offs are deliberate:
+
+- Builders run as `root` with full SSH and outbound network. That is the point: install packages, debug, reproduce.
+- There is no RBAC, approval gate or permission matrix. Access to the console is access to the platform.
+- PCS never executes Docker commands. Host-runtime verifies signed commands before acting.
+- Builder SSH is key-only; the host's login public key is injected at deploy time.
+- PCS encrypts host private keys with AES-256-GCM and only returns fingerprints.
+- Model credentials stay in the runtime container, gated by `PLATFORM_AGENT_PASS_ENV` and the profile's `--pass-env`.
+- Sideload tokens are shown once, stored as a SHA-256 hash, and only reach PCS; the device never sees the scheduler address or its instance credentials.
+- Put PCS (7901), scheduler API (8443) and SSH ports behind a firewall or VPN. Never expose them directly.
+
+Report vulnerabilities privately via [SECURITY.md](SECURITY.md).
+
+## Development
+
+```bash
+cd scheduler   && npm install && npm run typecheck && npm test
+cd pcs-issuer  && npm install && npm run typecheck && npm test   # needs PostgreSQL
+cd host-runtime && npm install && npm run typecheck && npm test
+cd secret-store && npm install && npm run typecheck && npm test
+cd admin-app   && npm install && npm run lint && npm test && npm run build
+```
+
+Acceptance and load scripts: [scripts/README.md](scripts/README.md). They create/reset databases — do not run them against a production control plane.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full setup, checks, code style and release process. By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Changes are recorded in [CHANGELOG.md](CHANGELOG.md).
+
+## Documentation
+
+Every design doc exists in English and Chinese; each page links to its counterpart. The interactive diagrams live under [`docs/`](docs/).
+
+- [Architecture](docs/architecture.md)
+- [Scheduling algorithm](docs/scheduling-algorithm.md) — capability scoring, water filling, pressure handling, relay
+- [Allocation by business role](docs/role-allocation.md) — operator-defined roles and plans, deterministic matching, role workdirs and stage hooks
+- [Control plane & host federation](docs/federation.md)
+- [Builders](docs/builders.md)
+- [Scheduler](docs/scheduler.md)
+- [Admin app](docs/admin-app.md)
+- [Agent control](docs/agent-control.md) — task parks, autonomy levels, typed outcomes, failure classes
+- [Sideloads](docs/sideload.md) — curl tokens, permissions, files in and out
+- [Example project architecture](docs/example-project-architecture.html) — a concrete scheduler + N development machines deployment
+- [Deployment](docs/deployment.md)
+- [Chinese README](README.zh-CN.md)
+
+## License
+
+[MIT](LICENSE). Use it, fork it, ship it commercially — keep the copyright notice.
