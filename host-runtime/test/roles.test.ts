@@ -191,6 +191,18 @@ describe("role workdir and deterministic stage hooks", () => {
     }
   });
 
+  it("maps the declared workspace root onto this attempt's directory", () => {
+    const prev = process.env.BUILDER_PROJECT_ROOTS;
+    process.env.BUILDER_PROJECT_ROOTS = "/work";
+    try {
+      assert.equal(resolveWorkdir("/tmp/ws/attempt-1", "/tmp/ws/ui-dev"), "/tmp/ws/attempt-1/ui-dev");
+      assert.equal(resolveWorkdir("/tmp/ws/attempt-1", "/tmp/ws"), "/tmp/ws/attempt-1");
+    } finally {
+      if (prev === undefined) delete process.env.BUILDER_PROJECT_ROOTS;
+      else process.env.BUILDER_PROJECT_ROOTS = prev;
+    }
+  });
+
   it("prepare runs before the agent in the role workdir with task context", async () => {
     const { ctx } = makeCtx();
     const work = fs.mkdtempSync(path.join(BASE, "role-"));

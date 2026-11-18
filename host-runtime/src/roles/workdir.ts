@@ -19,8 +19,15 @@ export function resolveWorkdir(root: string, rel: string): string {
   // while the actual execution directory is workspace/<attempt_id>; map the root path to this attempt's directory.
   const workspaceRoot = path.dirname(base);
   const requested = path.isAbsolute(rel) ? path.resolve(rel) : path.resolve(base, rel);
-  const abs =
-    requested === workspaceRoot
+  // A declared project root wins over the workspace-root mapping: the two can
+  // share a prefix (for example both under /tmp in tests), and a mounted tree
+  // must be used exactly as declared.
+  const mounted = projectRoots().some(
+    (allowedRoot) => requested === allowedRoot || requested.startsWith(allowedRoot + path.sep),
+  );
+  const abs = mounted
+    ? requested
+    : requested === workspaceRoot
       ? base
       : requested.startsWith(workspaceRoot + path.sep)
         ? path.resolve(base, path.relative(workspaceRoot, requested))

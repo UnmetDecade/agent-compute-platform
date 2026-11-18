@@ -3,7 +3,9 @@
  *
  *   node scripts/capture-readme.mjs --lang en
  *   node scripts/capture-readme.mjs --lang zh
- *   node scripts/capture-readme.mjs --arch both
+ *   node scripts/capture-readme.mjs --arch --lang en
+ *   node scripts/capture-readme.mjs --arch --lang zh
+ *   node scripts/capture-readme.mjs --example --lang en
  *
  * Output goes to the repo's docs/assets/:
  *   dashboard-<lang>.png   overview (studio)
@@ -23,6 +25,9 @@ import { fileURLToPath } from "node:url";
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const PORT = 9447;
 const BASE = process.env.CAPTURE_BASE ?? "http://127.0.0.1:5173";
+// Optional console credentials: a deployed stack sits behind the PCS sign-in page.
+const CAPTURE_USER = process.env.CAPTURE_USER ?? "";
+const CAPTURE_PASSWORD = process.env.CAPTURE_PASSWORD ?? "";
 const WIDTH = 1600;
 const HEIGHT = 1000;
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -33,6 +38,7 @@ const args = process.argv.slice(2);
 const LANG = (args.find((a) => a.startsWith("--lang="))?.split("=")[1] ??
   (args.includes("--lang") ? args[args.indexOf("--lang") + 1] : "")) || "en";
 const ARCH = args.includes("--arch");
+const EXAMPLE = args.includes("--example");
 const ALL = args.includes("--all");
 const DARK = args.includes("--dark");
 const HERO_ONLY = args.includes("--hero-only");
@@ -121,10 +127,33 @@ async function openPage(url) {
     width: WIDTH, height: HEIGHT, deviceScaleFactor: 2, mobile: false,
   });
   await sleep(400);
-  await evaluate(`localStorage.setItem("app-theme", ${JSON.stringify(THEME)}); localStorage.setItem("app-lang", ${JSON.stringify(LANG)});`);
+  await evaluate(`localStorage.setItem("app-theme", ${JSON.stringify(THEME)}); localStorage.setItem("app-lang", ${JSON.stringify(LANG)}); localStorage.setItem("app-lang-explicit", "1");`);
   await send("Page.reload");
   await sleep(3500);
   await evaluate(SCRUB);
+}
+
+/** Sign in when the console redirects to the PCS login page. */
+async function signInIfConfigured() {
+  if (!CAPTURE_USER || !CAPTURE_PASSWORD) return;
+  const onLogin = await evaluate(`Boolean(document.querySelector('input[autocomplete="username"]'))`);
+  if (!onLogin) return;
+  await evaluate(`(() => {
+    const set = (el, value) => {
+      const setter = Object.getOwnPropertyDescriptor(el.constructor.prototype, "value").set;
+      setter.call(el, value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    set(document.querySelector('input[autocomplete="username"]'), ${JSON.stringify(CAPTURE_USER)});
+    set(document.querySelector('input[autocomplete="current-password"]'), ${JSON.stringify(CAPTURE_PASSWORD)});
+    document.querySelector("form").requestSubmit();
+  })()`);
+  await waitFor(
+    async () => !(await evaluate(`Boolean(document.querySelector('input[autocomplete="username"]'))`)),
+    15_000,
+    "PCS sign-in",
+  );
+  await sleep(1500);
 }
 
 function ffmpeg(args) {
@@ -177,11 +206,8 @@ async function makeStudioGif() {
   console.log(`✓ studio-${SUFFIX}.gif`);
 }
 
-async function captureArchitecture() {
-  const target = LANG === "zh"
-    ? path.join(ROOT, "docs/platform-architecture.zh-CN.html")
-    : path.join(ROOT, "docs/platform-architecture.html");
-  await send("Page.navigate", { url: `file://${target}` });
+async function captureFullPage(html, name) {
+  await send("Page.navigate", { url: `file://${html}` });
   await sleep(1500);
   await send("Emulation.setDeviceMetricsOverride", {
     width: 1600, height: 1000, deviceScaleFactor: 1.5, mobile: false,
@@ -196,9 +222,20 @@ async function captureArchitecture() {
     // The device scale factor already scales the output; a clip scale would multiply it again.
     clip: { x: 0, y: 0, width: 1600, height, scale: 1 },
   });
-  const name = `architecture-${LANG}.png`;
   fs.writeFileSync(path.join(OUT, name), Buffer.from(data.data, "base64"));
   console.log(`✓ ${name} (${height}px tall)`);
+}
+
+async function captureArchitecture() {
+  const html = LANG === "zh" ? "platform-architecture.zh-CN.html" : "platform-architecture.html";
+  await captureFullPage(path.join(ROOT, "docs", html), `architecture-${LANG}.png`);
+}
+
+async function captureExample() {
+  const html = LANG === "zh"
+    ? "example-project-architecture.zh-CN.html"
+    : "example-project-architecture.html";
+  await captureFullPage(path.join(ROOT, "docs", html), `example-architecture-${LANG}.png`);
 }
 
 try {
@@ -225,13 +262,17 @@ try {
 
   if (ARCH) {
     await captureArchitecture();
+  } else if (EXAMPLE) {
+    await captureExample();
   } else if (GIF_ONLY) {
     await openPage(`${BASE}/`);
+    await signInIfConfigured();
     await waitFor(async () => evaluate(`Boolean(document.querySelector(".scene-scheduler"))`), 12_000, "studio data");
     await evaluate(SCRUB);
     await makeStudioGif();
   } else {
     await openPage(`${BASE}/`);
+    await signInIfConfigured();
     await waitFor(async () => evaluate(`Boolean(document.querySelector(".scene-scheduler"))`), 12_000, "studio data");
     await evaluate(SCRUB);
     await screenshot(`dashboard-${SUFFIX}.png`);

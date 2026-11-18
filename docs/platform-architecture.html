@@ -154,12 +154,18 @@
       a host can merge into another host to form a federation, and tasks that cross schedulers are
       pushed down, never copied. A sideload token lets one LAN device reach the same task path, and
       every task can move files in and out through the attachment and artifact channel.
+      Above the execution roles, operator-defined business roles and one allocation plan decide
+      which builder receives which request; the scheduler compiles the plan on save and enforces
+      folder exclusion at claim time.
     </p>
     <div class="chips">
       <span class="chip accent">PCS control plane</span>
       <span class="chip accent">Root scheduler</span>
       <span class="chip accent">Node scheduler</span>
       <span class="chip green">Leaf builder</span>
+      <span class="chip green">Business roles</span>
+      <span class="chip green">Allocation plan</span>
+      <span class="chip">Workdir exclusion</span>
       <span class="chip">Agent / API profiles</span>
       <span class="chip">Secret Store</span>
       <span class="chip">MCP builders</span>
@@ -198,7 +204,7 @@
         <text class="t2" x="60" y="92">Admin app (browser)</text>
         <text class="s2" x="60" y="116">Agent studio · builders · tasks</text>
         <text class="s2" x="60" y="138">Chat · terminal · folded by host</text>
-        <text class="s2" x="60" y="160" fill="#8a8d99">Single page · no roles</text>
+        <text class="s2" x="60" y="160" fill="#8a8d99">Business roles · plans · queue</text>
         <path class="edge-strong" d="M300,125 H400"/>
         <text class="lbl" x="350" y="112" text-anchor="middle">HTTPS</text>
 
@@ -662,6 +668,18 @@
     <article class="card">
       <h3><i>15</i>Trust boundary</h3>
       <p>The plaintext token is shown once; deleting or expiring it takes effect on the next call. Presence is throttled to one write per 30 seconds, and the studio shows online within 120 seconds. Builders listed to a sideload are the host root scheduler's subtree — exactly what a submitted task can run on.</p>
+    </article>
+    <article class="card">
+      <h3><i>16</i>Business roles</h3>
+      <p>Execution roles stay <code>scheduler</code> and <code>builder</code>. Operators define business roles (<code>ui-dev</code>, <code>code-review</code>, <code>test-bench</code>, …) with a display name, description and one plain-language operation note, then assign them to builders with weights. Builders start generic; no business role is baked into an image.</p>
+    </article>
+    <article class="card">
+      <h3><i>17</i>Allocation plans</h3>
+      <p>One plan per project is written as prose. The scheduler compiles it once on save (Anthropic-compatible model, <code>POST /v1/plans/compile</code> for scripted previews) into deterministic rules: priority → specificity → declaration order. A request never calls a model; the matched rule's role gets the first phase and its chain becomes the workflow stages. Activation publishes the rules; editing returns the plan to draft.</p>
+    </article>
+    <article class="card">
+      <h3><i>18</i>Workdir exclusion</h3>
+      <p>All builders may mount the same project tree. At claim time the scheduler compares a task's <code>requirements.build.workdir</code> with every live lease; an exact, parent or child overlap is refused with <code>WORKDIR_IN_USE</code>, naming the folder and the holder. The blocked task backs off and is admitted when the holder finishes.</p>
     </article>
   </div>
 

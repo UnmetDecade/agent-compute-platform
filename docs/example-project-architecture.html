@@ -162,7 +162,7 @@
     <div>
       <p class="eyebrow">Architecture example · sideload access</p>
       <h1>Example Project Architecture · Sideload Access</h1>
-      <p class="lede">Only two roles are built in: the <b>scheduler</b> (control plane) and the <b>development machine</b> (execution plane). Developers, testers, support staff, CI jobs, scripts and external systems are not containers or registered instances — each holds a <b>sideload token</b> (<code>sdl_…</code>) and calls <b>device → control plane → this host's root scheduler → development machine</b>. A device never learns the scheduler address and holds no instance credential. Host boxes stay generic — workspace, agent runtime, console commands and resource admission — with no project-specific operations.</p>
+      <p class="lede">Only two roles are built in: the <b>scheduler</b> (control plane) and the <b>development machine</b> (execution plane). Developers, testers, support staff, CI jobs, scripts and external systems are not containers or registered instances — each holds a <b>sideload token</b> (<code>sdl_…</code>) and calls <b>device → control plane → this host's root scheduler → development machine</b>. A device never learns the scheduler address and holds no instance credential. Host boxes stay generic — workspace, agent runtime, console commands and resource admission — with no project-specific operations. A business role (<code>ui-dev</code>, <code>code-review</code>, …) is only an allocation label on a development machine, selected by the project's prose allocation plan.</p>
     </div>
     <div class="head-actions">
       <a class="lang" href="example-project-architecture.zh-CN.html" hreflang="zh-CN">Chinese</a>

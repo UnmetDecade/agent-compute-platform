@@ -7,7 +7,7 @@
  * never connecting to builders directly and never holding SSH private keys.
  *
  * Mounted into Claude Code by cli-agent via --mcp-config; tool names look like
- * mcp__builders__builder_exec.
+ * mcp__builders__builder_exec。
  *
  * Environment:
  *   SCHEDULER_URL  defaults to http://127.0.0.1:8443 (the scheduler itself inside its container)

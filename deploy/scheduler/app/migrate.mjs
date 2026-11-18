@@ -5479,7 +5479,16 @@ var config = {
   grantIntervalMs: Math.max(
     1e3,
     Number(process.env.GRANT_UPDATE_INTERVAL_MS ?? 5e3) || 5e3
-  )
+  ),
+  // The operator writes allocation plans as prose; this compiler turns them into
+  // the deterministic rule document once, before activation. It is never called
+  // on the request path.
+  planCompiler: {
+    baseUrl: (process.env.PLAN_COMPILER_BASE_URL ?? process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com").trim().replace(/\/+$/, ""),
+    apiKey: (process.env.PLAN_COMPILER_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? process.env.DEEPSEEK_API_KEY ?? "").trim(),
+    model: (process.env.PLAN_COMPILER_MODEL ?? "deepseek-chat").trim(),
+    timeoutMs: Math.max(1e3, Number(process.env.PLAN_COMPILER_TIMEOUT_MS ?? 6e4) || 6e4)
+  }
 };
 if (Boolean(config.tlsCertFile) !== Boolean(config.tlsKeyFile)) {
   throw new Error("SCHEDULER_TLS_CERT_FILE and SCHEDULER_TLS_KEY_FILE must be configured together");
@@ -5539,4 +5548,6 @@ await runFile("010_failure_recovery.sql");
 await runFile("011_artifact_names.sql");
 await runFile("012_threads.sql");
 await runFile("013_effects.sql");
+await runFile("014_business_roles.sql");
+await runFile("015_role_prompts.sql");
 process.exit(0);

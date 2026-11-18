@@ -5644,7 +5644,16 @@ var config = {
   grantIntervalMs: Math.max(
     1e3,
     Number(process.env.GRANT_UPDATE_INTERVAL_MS ?? 5e3) || 5e3
-  )
+  ),
+  // The operator writes allocation plans as prose; this compiler turns them into
+  // the deterministic rule document once, before activation. It is never called
+  // on the request path.
+  planCompiler: {
+    baseUrl: (process.env.PLAN_COMPILER_BASE_URL ?? process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com").trim().replace(/\/+$/, ""),
+    apiKey: (process.env.PLAN_COMPILER_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? process.env.DEEPSEEK_API_KEY ?? "").trim(),
+    model: (process.env.PLAN_COMPILER_MODEL ?? "deepseek-chat").trim(),
+    timeoutMs: Math.max(1e3, Number(process.env.PLAN_COMPILER_TIMEOUT_MS ?? 6e4) || 6e4)
+  }
 };
 if (Boolean(config.tlsCertFile) !== Boolean(config.tlsKeyFile)) {
   throw new Error("SCHEDULER_TLS_CERT_FILE and SCHEDULER_TLS_KEY_FILE must be configured together");
@@ -6483,7 +6492,9 @@ var dynamicScoreOf = (inst) => {
 var CAPABILITY_PREFER_WINDOW_SECONDS = 30;
 async function loadIdlePeers(c, inst) {
   const rows = (await c.query(
-    `SELECT p.*
+    `SELECT p.*,
+              (SELECT array_agg(ir.role_key) FROM instance_roles ir
+                WHERE ir.instance_id = p.instance_id) AS business_roles
          FROM role_instances p
          JOIN hosts h ON h.host_id = p.host_id
         WHERE p.role_id = $1
@@ -6505,6 +6516,8 @@ function peerCanTakeTask(p, task) {
   const schemas = Array.isArray(p.payload_schemas) ? p.payload_schemas : [];
   if (!allowedTypes.includes(task.task_type)) return false;
   if (!schemas.includes(task.payload_schema)) return false;
+  const roles = Array.isArray(p.business_roles) ? p.business_roles : [];
+  if (task.business_role && !roles.includes(task.business_role)) return false;
   const target = task.requirements?.target_instance_id;
   if (target && target !== p.instance_id) return false;
   const needed = task.requirements?.capabilities ?? [];
@@ -6609,7 +6622,24 @@ async function claim(input) {
            OR t.requirements->>'target_instance_id' = $6
          )
          AND ($7 <= 0 OR t.difficulty <= $7)
-       ORDER BY effective_priority ASC, t.enqueued_at ASC, t.task_id ASC
+         -- Role-based allocation: a task that names a business role is only
+         -- claimable by an instance the operator assigned to that role.
+         AND (
+           t.business_role IS NULL
+           OR EXISTS (
+             SELECT 1
+               FROM instance_roles ir
+               JOIN business_roles br
+                 ON br.role_key = ir.role_key AND br.enabled
+              WHERE ir.instance_id = $6 AND ir.role_key = t.business_role
+           )
+         )
+       ORDER BY effective_priority ASC,
+                COALESCE((
+                  SELECT ir.weight FROM instance_roles ir
+                   WHERE ir.instance_id = $6 AND ir.role_key = t.business_role
+                ), 0) DESC,
+                t.enqueued_at ASC, t.task_id ASC
        FOR UPDATE OF t SKIP LOCKED
        LIMIT $8`;
     const cand = await c.query(candidateSql, [
@@ -6697,8 +6727,50 @@ async function recordBlock(c, task, blocked, cfg, traceId) {
     });
   }
 }
+function taskWorkdir(task) {
+  const build = task.requirements?.build;
+  const workdir = typeof build?.workdir === "string" ? build.workdir.trim() : "";
+  return workdir ? workdir.replace(/\/+$/, "") : null;
+}
+async function workdirHolder(c, task) {
+  const workdir = taskWorkdir(task);
+  if (!workdir) return null;
+  const res = await c.query(
+    `SELECT t2.task_id, l.instance_id, t2.business_role,
+            rtrim(t2.requirements->'build'->>'workdir', '/') AS workdir
+       FROM leases l
+       JOIN tasks t2 ON t2.task_id = l.task_id
+      WHERE l.released_at IS NULL
+        AND l.expires_at > app_now()
+        AND t2.task_id <> $1
+        AND t2.requirements->'build'->>'workdir' IS NOT NULL
+        AND (
+          rtrim(t2.requirements->'build'->>'workdir', '/') = $2
+          OR left($2, length(rtrim(t2.requirements->'build'->>'workdir', '/')) + 1)
+             = rtrim(t2.requirements->'build'->>'workdir', '/') || '/'
+          OR left(rtrim(t2.requirements->'build'->>'workdir', '/'), length($2) + 1)
+             = $2 || '/'
+        )
+      LIMIT 1`,
+    [task.task_id, workdir]
+  );
+  return res.rows[0] ?? null;
+}
 async function admit(c, ctx, task) {
   const { cfg, inst, host, mode, res, policy } = ctx;
+  const holder = await workdirHolder(c, task);
+  if (holder) {
+    return {
+      reason: "WORKDIR_IN_USE",
+      detail: {
+        workdir: holder.workdir,
+        held_by_task: holder.task_id,
+        held_by_instance: holder.instance_id,
+        held_by_role: holder.business_role,
+        message: `Workdir ${holder.workdir} is in use by ${holder.instance_id} and cannot be allocated right now`
+      }
+    };
+  }
   const typeActive = await countActive(
     c,
     `SELECT count(*)::int AS n
@@ -7477,6 +7549,7 @@ async function insertTask(c, input) {
   }
   const approvalMode = input.approval_mode ?? (await c.query(`SELECT default_approval_mode FROM scheduler_config WHERE id = TRUE`)).rows[0]?.default_approval_mode ?? "full";
   const fanoutDepth = Math.max(0, Math.min(32, Number(input.fanout_depth) || 0));
+  const businessRole = input.business_role ?? (typeof input.requirements?.business_role === "string" ? input.requirements.business_role : null);
   if (relayParent) {
     const existing = await c.query(`SELECT * FROM tasks WHERE relay_parent_task_id = $1`, [
       relayParent
@@ -7488,8 +7561,8 @@ async function insertTask(c, input) {
                         priority_class, status, payload_ref, payload_sha256, payload_schema,
                         requirements, resource_profile_id, max_attempts, difficulty, enqueued_at,
                         deadline_at, created_at, updated_at, relay_parent_task_id, relay_depth,
-                        approval_mode, fanout_id, fanout_depth)
-     VALUES ($1,$2,$3,$4,$5,$6,'QUEUED',$7,$8,$9,$10,$11,$12,$13, app_now(), $14, app_now(), app_now(), $15, $16, $17, $18, $19)
+                        approval_mode, fanout_id, fanout_depth, business_role, plan_id)
+     VALUES ($1,$2,$3,$4,$5,$6,'QUEUED',$7,$8,$9,$10,$11,$12,$13, app_now(), $14, app_now(), app_now(), $15, $16, $17, $18, $19, $20, $21)
      ON CONFLICT (relay_parent_task_id) WHERE relay_parent_task_id IS NOT NULL DO NOTHING
      RETURNING *`,
     [
@@ -7511,7 +7584,9 @@ async function insertTask(c, input) {
       relayDepth,
       approvalMode,
       input.fanout_id ?? null,
-      fanoutDepth
+      fanoutDepth,
+      businessRole,
+      input.plan_id ?? null
     ]
   );
   if (!res.rows[0]) {
@@ -7530,6 +7605,7 @@ async function insertTask(c, input) {
       priority_class: priority,
       difficulty,
       approval_mode: approvalMode,
+      ...businessRole ? { business_role: businessRole, plan_id: input.plan_id ?? null } : {},
       ...relayParent ? { relay_parent_task_id: relayParent, parent_node_id: input.relay?.parent_node_id ?? null } : {}
     },
     trace_id: input.trace_id
@@ -7586,13 +7662,20 @@ async function createWorkflowRun(input) {
       throw new ApiError(422, "WORKFLOW_TEMPLATE_INVALID", "the first phase must have a task_type");
     }
     const runId = newId("wfr");
+    const firstRequirements = {
+      ...first.requirements ?? {},
+      ...sanitizeRequirements(input.requirements)
+    };
+    const firstBusinessRole = (typeof firstRequirements.business_role === "string" ? firstRequirements.business_role : void 0) ?? first.business_role;
+    if (firstBusinessRole) firstRequirements.business_role = firstBusinessRole;
     const context = {
       priority_class: input.priority_class ?? 1,
       payload_ref: input.payload_ref ?? null,
       payload_sha256: input.payload_sha256 ?? null,
       payload_schema: input.payload_schema ?? "1.0",
-      requirements: sanitizeRequirements(input.requirements),
-      deadline_at: input.deadline_at ?? null
+      requirements: firstRequirements,
+      deadline_at: input.deadline_at ?? null,
+      plan_id: input.plan_id ?? null
     };
     await c.query(
       `INSERT INTO workflow_runs
@@ -7609,7 +7692,9 @@ async function createWorkflowRun(input) {
       payload_schema: context.payload_schema,
       requirements: context.requirements,
       deadline_at: context.deadline_at ?? void 0,
-      trace_id: input.trace_id
+      trace_id: input.trace_id,
+      business_role: firstBusinessRole,
+      plan_id: input.plan_id
     });
     const run = (await c.query(
       `UPDATE workflow_runs
@@ -7701,6 +7786,38 @@ async function insertNextTask(c, run, prev, phase, extra = {}) {
       task_type: prev.task_type
     }))
   ].filter((v, i, all) => all.findIndex((x) => x.artifact_id === v.artifact_id) === i).slice(-50);
+  const ctxRequirements = ctx.requirements ?? {};
+  const phaseReq = { ...phase.requirements ?? {} };
+  if (phase.business_role) {
+    const role = (await c.query(
+      `SELECT required_capabilities, allowed_paths, workdir_template
+           FROM business_roles WHERE role_key = $1`,
+      [phase.business_role]
+    )).rows[0];
+    const roleCaps = role?.required_capabilities ?? [];
+    phaseReq.capabilities = [
+      .../* @__PURE__ */ new Set([
+        "code.build",
+        "shell",
+        ...roleCaps,
+        ...phaseReq.capabilities ?? []
+      ])
+    ];
+    if (role?.allowed_paths?.length) phaseReq.allowed_paths = role.allowed_paths;
+    if (phaseReq.build && typeof phaseReq.build === "object") {
+      const build = { ...phaseReq.build };
+      if (!build.mode) build.mode = build.command ? "command" : "agent";
+      if (build.workdir === void 0 && role?.workdir_template) {
+        const project = String(ctxRequirements.project ?? "");
+        build.workdir = String(role.workdir_template).replaceAll("{project}", project).replaceAll("{role}", phase.business_role);
+      }
+      phaseReq.build = build;
+    }
+  }
+  const nextRole = phase.business_role ?? (typeof phaseReq.business_role === "string" ? phaseReq.business_role : void 0) ?? (typeof prevReq.business_role === "string" ? prevReq.business_role : void 0);
+  if (nextRole) phaseReq.business_role = nextRole;
+  if (run.root_task_id) phaseReq.origin_task_id = run.root_task_id;
+  if (typeof ctx.plan_id === "string") phaseReq.plan_id = ctx.plan_id;
   const requirements = {
     ...ctx.requirements ?? {},
     ...prevReq,
@@ -7709,6 +7826,7 @@ async function insertNextTask(c, run, prev, phase, extra = {}) {
       upstream_artifact_id: artifacts[0]?.artifact_id,
       upstream_sha256: artifacts[0]?.actual_sha256
     } : {},
+    ...phaseReq,
     ...extra
   };
   const input = {
@@ -7720,7 +7838,9 @@ async function insertNextTask(c, run, prev, phase, extra = {}) {
     payload_sha256: ctx.payload_sha256 ?? prev.payload_sha256 ?? void 0,
     payload_schema: ctx.payload_schema ?? prev.payload_schema ?? "1.0",
     requirements,
-    deadline_at: ctx.deadline_at ?? void 0
+    deadline_at: ctx.deadline_at ?? void 0,
+    business_role: nextRole,
+    plan_id: typeof ctx.plan_id === "string" ? ctx.plan_id : void 0
   };
   return insertTask(c, input);
 }
@@ -9050,6 +9170,10 @@ async function listTasks(filter) {
   if (filter.role) {
     params.push(filter.role);
     where.push(`td.target_role = $${params.length}`);
+  }
+  if (filter.business_role) {
+    params.push(filter.business_role);
+    where.push(`t.business_role = $${params.length}`);
   }
   params.push(Math.min(filter.limit ?? 100, 500));
   return q(
@@ -10450,6 +10574,925 @@ async function sweepDrainTimeouts() {
   return rows.map((r) => String(r.instance_id));
 }
 
+// scheduler/src/repo/roles.ts
+import { createHash as createHash4 } from "node:crypto";
+var ROLE_KEY_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+function stringList(value, field) {
+  if (value === void 0 || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new ApiError(400, "BAD_REQUEST", `${field} must be an array of strings`);
+  }
+  const out = value.map((v) => String(v).trim()).filter(Boolean);
+  return [...new Set(out)];
+}
+function roleKey(value) {
+  const key = String(value ?? "").trim();
+  if (!ROLE_KEY_RE.test(key)) {
+    throw new ApiError(
+      400,
+      "BAD_REQUEST",
+      "role_key must match [a-z0-9][a-z0-9._-]{0,63}"
+    );
+  }
+  return key;
+}
+function deriveRoleKey(name) {
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 56);
+  if (slug) return slug;
+  const hash = createHash4("sha1").update(name).digest("hex").slice(0, 8);
+  return `role-${hash}`;
+}
+function weightOf(value) {
+  const n2 = Number(value ?? 100);
+  if (!Number.isFinite(n2)) return 100;
+  return Math.min(1e3, Math.max(0, Math.trunc(n2)));
+}
+function rolesInPlan(document) {
+  const doc = document ?? {};
+  const rules = Array.isArray(doc.rules) ? doc.rules : [];
+  const out = [];
+  for (const raw of rules) {
+    if (!raw || typeof raw !== "object") continue;
+    const rule = raw;
+    if (typeof rule.role === "string") out.push(rule.role);
+    const chain = Array.isArray(rule.chain) ? rule.chain : [];
+    for (const step of chain) {
+      if (step && typeof step === "object" && typeof step.role === "string") {
+        out.push(step.role);
+      } else if (typeof step === "string") {
+        out.push(step);
+      }
+    }
+  }
+  return [...new Set(out)];
+}
+async function listBusinessRoles(project) {
+  return q(
+    `SELECT br.*,
+            count(ir.instance_id)::int AS instances_total,
+            count(ir.instance_id) FILTER (WHERE ri.state = 'ONLINE')::int AS instances_online
+       FROM business_roles br
+       LEFT JOIN instance_roles ir ON ir.role_key = br.role_key
+       LEFT JOIN role_instances ri ON ri.instance_id = ir.instance_id
+      WHERE ($1::text IS NULL OR br.project = $1 OR br.project = '*')
+      GROUP BY br.role_key
+      ORDER BY br.project, br.role_key`,
+    [project ?? null]
+  );
+}
+async function getBusinessRole(key) {
+  const row = await q1(`SELECT * FROM business_roles WHERE role_key = $1`, [key]);
+  if (!row) throw new ApiError(404, "ROLE_UNKNOWN", `business role not found: ${key}`);
+  return row;
+}
+async function createBusinessRole(input) {
+  const name = String(input.name ?? input.role_key ?? "").trim();
+  if (!name) throw new ApiError(400, "BAD_REQUEST", "name is required");
+  const project = String(input.project ?? "*").trim() || "*";
+  const baseKey = input.role_key ? roleKey(input.role_key) : deriveRoleKey(name);
+  const workdir = input.workdir_template ? String(input.workdir_template) : "/work/{project}/work/{role}";
+  const maxAttempts = input.role_key ? 1 : 20;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const key = attempt === 1 ? baseKey : `${baseKey}-${attempt}`;
+    const row = await q1(
+      `INSERT INTO business_roles
+         (role_key, project, name, description, operation_prompt,
+          required_capabilities, allowed_paths, workdir_template, enabled)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9, TRUE))
+       ON CONFLICT (role_key) DO NOTHING
+       RETURNING *`,
+      [
+        key,
+        project,
+        name,
+        String(input.description ?? ""),
+        String(input.operation_prompt ?? ""),
+        stringList(input.required_capabilities, "required_capabilities"),
+        stringList(input.allowed_paths, "allowed_paths"),
+        workdir,
+        input.enabled ?? true
+      ]
+    );
+    if (row) return row;
+  }
+  if (input.role_key) throw new ApiError(409, "ROLE_EXISTS", `business role already exists: ${baseKey}`);
+  throw new ApiError(409, "ROLE_EXISTS", `could not find a free role key for ${name}`);
+}
+async function updateBusinessRole(key, input) {
+  const existing = await getBusinessRole(key);
+  const row = await q1(
+    `UPDATE business_roles
+        SET project = $2,
+            name = $3,
+            description = $4,
+            operation_prompt = $9,
+            required_capabilities = $5,
+            allowed_paths = $6,
+            workdir_template = $7,
+            enabled = $8,
+            updated_at = app_now()
+      WHERE role_key = $1
+      RETURNING *`,
+    [
+      key,
+      input.project === void 0 ? existing.project : String(input.project),
+      input.name === void 0 ? existing.name : String(input.name).trim() || existing.name,
+      input.description === void 0 ? existing.description : String(input.description),
+      input.required_capabilities === void 0 ? existing.required_capabilities : stringList(input.required_capabilities, "required_capabilities"),
+      input.allowed_paths === void 0 ? existing.allowed_paths : stringList(input.allowed_paths, "allowed_paths"),
+      input.workdir_template === void 0 ? existing.workdir_template : input.workdir_template ? String(input.workdir_template) : null,
+      input.enabled === void 0 ? existing.enabled : Boolean(input.enabled),
+      input.operation_prompt === void 0 ? existing.operation_prompt : String(input.operation_prompt)
+    ]
+  );
+  return row;
+}
+async function deleteBusinessRole(key) {
+  const plans = await q(
+    `SELECT plan_id, document FROM allocation_plans WHERE status <> 'DISABLED'`
+  );
+  const users = plans.filter((p) => rolesInPlan(p.document).includes(key)).map((p) => p.plan_id);
+  if (users.length) {
+    throw new ApiError(409, "ROLE_IN_USE", `role ${key} is referenced by plans: ${users.join(", ")}`, {
+      plans: users
+    });
+  }
+  const row = await q1(`DELETE FROM business_roles WHERE role_key = $1 RETURNING role_key`, [key]);
+  if (!row) throw new ApiError(404, "ROLE_UNKNOWN", `business role not found: ${key}`);
+  return { deleted: key };
+}
+async function listInstanceRoles(instanceId) {
+  const inst = await q1(`SELECT instance_id FROM role_instances WHERE instance_id = $1`, [instanceId]);
+  if (!inst) throw new ApiError(404, "INSTANCE_UNKNOWN", `instance not registered: ${instanceId}`);
+  return q(
+    `SELECT ir.role_key, ir.weight, ir.assigned_by, ir.assigned_at,
+            br.name, br.project, br.enabled
+       FROM instance_roles ir
+       JOIN business_roles br USING (role_key)
+      WHERE ir.instance_id = $1
+      ORDER BY br.project, ir.role_key`,
+    [instanceId]
+  );
+}
+async function setInstanceRoles(instanceId, roles, actor = "operator") {
+  if (!Array.isArray(roles)) throw new ApiError(400, "BAD_REQUEST", "roles must be an array");
+  const normalized = roles.map((r) => ({
+    role_key: roleKey(r?.role_key),
+    weight: weightOf(r?.weight)
+  }));
+  const unique = new Map(normalized.map((r) => [r.role_key, r]));
+  if (unique.size !== normalized.length) {
+    throw new ApiError(400, "BAD_REQUEST", "duplicate role_key in assignment");
+  }
+  return tx(async (c) => {
+    const inst = (await c.query(`SELECT * FROM role_instances WHERE instance_id = $1 FOR UPDATE`, [instanceId])).rows[0];
+    if (!inst) throw new ApiError(404, "INSTANCE_UNKNOWN", `instance not registered: ${instanceId}`);
+    if (inst.role_id !== "builder") {
+      throw new ApiError(
+        422,
+        "ROLE_NOT_ALLOWED",
+        `only a builder can receive business roles; ${instanceId} is ${inst.role_id}`
+      );
+    }
+    const keys = [...unique.keys()];
+    const roleRows = keys.length ? (await c.query(
+      `SELECT role_key, enabled, required_capabilities
+               FROM business_roles WHERE role_key = ANY($1::text[])`,
+      [keys]
+    )).rows : [];
+    const byKey = new Map(roleRows.map((r) => [r.role_key, r]));
+    const missing = keys.filter((k) => !byKey.has(k));
+    if (missing.length) {
+      throw new ApiError(404, "ROLE_UNKNOWN", `unknown business roles: ${missing.join(", ")}`);
+    }
+    const disabled = roleRows.filter((r) => !r.enabled).map((r) => r.role_key);
+    if (disabled.length) {
+      throw new ApiError(422, "ROLE_DISABLED", `disabled business roles: ${disabled.join(", ")}`);
+    }
+    const caps = inst.capabilities ?? {};
+    const usable = new Set(
+      (caps.healthy ?? []).filter((x) => !(caps.unhealthy ?? []).includes(x))
+    );
+    const needed = [
+      ...new Set(roleRows.flatMap((r) => r.required_capabilities ?? []))
+    ];
+    const absent = needed.filter((x) => !usable.has(x));
+    if (absent.length) {
+      throw new ApiError(
+        422,
+        "CAPABILITY_MISMATCH",
+        `instance ${instanceId} lacks capabilities required by the requested roles: ${absent.join(", ")}`,
+        { missing: absent, healthy: [...usable] }
+      );
+    }
+    await c.query(`DELETE FROM instance_roles WHERE instance_id = $1`, [instanceId]);
+    for (const r of unique.values()) {
+      await c.query(
+        `INSERT INTO instance_roles (instance_id, role_key, weight, assigned_by)
+         VALUES ($1,$2,$3,$4)`,
+        [instanceId, r.role_key, r.weight, actor]
+      );
+    }
+    return (await c.query(
+      `SELECT ir.role_key, ir.weight, ir.assigned_by, ir.assigned_at,
+                br.name, br.project
+           FROM instance_roles ir JOIN business_roles br USING (role_key)
+          WHERE ir.instance_id = $1 ORDER BY br.project, ir.role_key`,
+      [instanceId]
+    )).rows;
+  });
+}
+async function roleCoverage(project) {
+  return q(
+    `SELECT br.role_key, br.name, br.project, br.enabled,
+            br.allowed_paths, br.workdir_template, br.required_capabilities,
+            count(ir.instance_id)::int AS instances_total,
+            count(ir.instance_id) FILTER (WHERE ri.state = 'ONLINE')::int AS instances_online
+       FROM business_roles br
+       LEFT JOIN instance_roles ir ON ir.role_key = br.role_key
+       LEFT JOIN role_instances ri ON ri.instance_id = ir.instance_id
+      WHERE ($1::text IS NULL OR br.project = $1 OR br.project = '*')
+      GROUP BY br.role_key
+      ORDER BY br.project, br.role_key`,
+    [project ?? null]
+  );
+}
+
+// scheduler/src/repo/plan-compiler.ts
+var SYSTEM_PROMPT = `You are the "allocation plan compiler" of the Intelligent Task Scheduling System scheduler. An operator uses natural language to describe how tasks in a project should be allocated.
+Your only job is to translate that description into the rule JSON that the scheduler executes.
+
+Rule document structure:
+{"rules":[{
+  "id": "short identifier, unique within the plan",
+  "priority": 20,
+  "match": {"category":["..."], "keywords":["..."], "path_prefix":["..."], "subsystem":["..."], "task_type":["task.build"]},
+  "role": "role_key of an existing business role",
+  "task_type": "task.build",
+  "build": {"instruction": "what to tell the executing role, optional"},
+  "chain": [{"role": "role_key", "build": {"command": "shell command", "mode": "command"}}]
+}]}
+
+Hard requirements:
+1. Only use the provided role_key values; do not invent roles, capabilities, or task types.
+2. Write build.command only when the description explicitly provides a shell command; do not make up commands. Every chain step
+   must define build, and must include at least build.instruction (one sentence stating what this step does); do not leave it empty.
+3. Every dimension listed in match must match; within one dimension any single hit is enough. Keywords are used for literal
+   matching against the description, so take them from the description itself where possible.
+4. If the description implies an "other/default/fallback" case, you may add {"id":"fallback","priority":0,"match":{"any":true},"role":"..."};
+   if there is no explicit fallback, do not add one \u2014 unmatched requests are rejected, which is safer than a wrong allocation.
+5. Higher priority wins; give more specific rules a higher priority.
+6. Output JSON only; no markdown code fences and no explanation.`;
+function extractJson(text) {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const body = fenced ? fenced[1].trim() : trimmed;
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  if (start < 0 || end <= start) {
+    throw new ApiError(502, "PLAN_COMPILE_FAILED", "plan compiler did not return a JSON object");
+  }
+  try {
+    return JSON.parse(body.slice(start, end + 1));
+  } catch {
+    throw new ApiError(502, "PLAN_COMPILE_FAILED", "plan compiler returned malformed JSON");
+  }
+}
+async function callModel(project, text, roles) {
+  const { baseUrl, model, timeoutMs } = config.planCompiler;
+  const apiKey = (process.env.PLAN_COMPILER_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? process.env.DEEPSEEK_API_KEY ?? config.planCompiler.apiKey).trim();
+  if (!apiKey) {
+    throw new ApiError(
+      503,
+      "PLAN_COMPILER_UNAVAILABLE",
+      "no model credential for the plan compiler (set ANTHROPIC_API_KEY or PLAN_COMPILER_API_KEY)"
+    );
+  }
+  const roleList = roles.filter((r) => r.enabled).map(
+    (r) => [
+      `- role_key: ${r.role_key}`,
+      `  name: ${r.name}`,
+      r.description ? `  description: ${r.description}` : "",
+      r.operation_prompt ? `  operation instructions: ${r.operation_prompt}` : ""
+    ].filter(Boolean).join("\n")
+  ).join("\n");
+  const user = `Project: ${project}
+
+Available business roles:
+${roleList || "(no available roles)"}
+
+The operator's allocation plan:
+${text}`;
+  const controller = new AbortController();
+  const timer2 = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        temperature: 0,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: "user", content: user }]
+      }),
+      signal: controller.signal
+    });
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    throw new ApiError(503, "PLAN_COMPILER_UNAVAILABLE", `plan compiler request failed: ${reason}`);
+  } finally {
+    clearTimeout(timer2);
+  }
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new ApiError(
+      502,
+      "PLAN_COMPILE_FAILED",
+      `plan compiler returned ${res.status}: ${payload.error?.message ?? "unknown error"}`
+    );
+  }
+  const textOut = (payload.content ?? []).map((part) => part.type === "text" ? part.text ?? "" : "").join("");
+  if (!textOut.trim()) {
+    throw new ApiError(502, "PLAN_COMPILE_FAILED", "plan compiler returned no text");
+  }
+  return extractJson(textOut);
+}
+async function compilePlanText(input) {
+  const project = String(input.project ?? "").trim();
+  const text = String(input.text ?? "").trim();
+  if (!project) throw new ApiError(400, "BAD_REQUEST", "project is required");
+  if (!text) throw new ApiError(400, "BAD_REQUEST", "plan text is empty");
+  if (text.length > 2e4) {
+    throw new ApiError(400, "BAD_REQUEST", "plan text is too long (20000 characters max)");
+  }
+  const roles = await q(
+    `SELECT role_key, name, description, operation_prompt, enabled
+       FROM business_roles WHERE project = $1 OR project = '*' ORDER BY role_key`,
+    [project]
+  );
+  if (!roles.length) {
+    throw new ApiError(
+      422,
+      "ROLE_UNKNOWN",
+      `project ${project} has no business roles; create roles before writing the plan`
+    );
+  }
+  const raw = await callModel(project, text, roles);
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.rules)) {
+    throw new ApiError(502, "PLAN_COMPILE_FAILED", "plan compiler returned no rules[]");
+  }
+  fillChainBuilds(raw, new Map(roles.map((r) => [r.role_key, r])));
+  return { document: raw, model: config.planCompiler.model };
+}
+function fillChainBuilds(document, roles) {
+  for (const rule of document.rules ?? []) {
+    for (const step of rule.chain ?? []) {
+      if (!step || typeof step !== "object") continue;
+      const build = step.build ?? {};
+      if (build.command || build.instruction) {
+        step.build = build;
+        continue;
+      }
+      const role = roles.get(String(step.role ?? ""));
+      step.build = {
+        ...build,
+        instruction: role?.operation_prompt?.trim() || `Complete this step according to the responsibilities of "${role?.name ?? step.role}".`
+      };
+    }
+  }
+}
+
+// scheduler/src/repo/plans.ts
+async function resolveDocument(input) {
+  const text = String(input.document_text ?? "").trim();
+  if (input.document !== void 0) return { document: input.document, text };
+  if (!text) {
+    throw new ApiError(400, "BAD_REQUEST", "a plan needs document_text or document.rules");
+  }
+  const compiled = await compilePlanText({ project: input.project, text });
+  return { document: compiled.document, text };
+}
+var RULE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+var MATCH_KEYS = ["category", "subsystem", "task_type", "path_prefix", "keywords"];
+function listOf(value) {
+  if (value === void 0 || value === null) return [];
+  if (Array.isArray(value)) return value.map((v) => String(v)).filter(Boolean);
+  return [String(value)].filter(Boolean);
+}
+function asSpec(value, field) {
+  if (value === void 0 || value === null) return void 0;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new ApiError(400, "PLAN_INVALID", `${field} must be an object`);
+  }
+  const spec = { ...value };
+  if (spec.mode !== void 0 && spec.mode !== "agent" && spec.mode !== "command") {
+    throw new ApiError(400, "PLAN_INVALID", `${field}.mode must be agent or command`);
+  }
+  if (spec.command !== void 0 && typeof spec.command !== "string") {
+    throw new ApiError(400, "PLAN_INVALID", `${field}.command must be a string`);
+  }
+  if (spec.instruction !== void 0 && typeof spec.instruction !== "string") {
+    throw new ApiError(400, "PLAN_INVALID", `${field}.instruction must be a string`);
+  }
+  return spec;
+}
+function normalizeDocument(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new ApiError(400, "PLAN_INVALID", "document must be an object");
+  }
+  const rulesRaw = raw.rules;
+  if (!Array.isArray(rulesRaw) || rulesRaw.length === 0) {
+    throw new ApiError(400, "PLAN_INVALID", "document.rules must be a non-empty array");
+  }
+  const seen = /* @__PURE__ */ new Set();
+  let fallbacks = 0;
+  const rules = rulesRaw.map((rawRule, index) => {
+    if (!rawRule || typeof rawRule !== "object" || Array.isArray(rawRule)) {
+      throw new ApiError(400, "PLAN_INVALID", `rules[${index}] must be an object`);
+    }
+    const r = rawRule;
+    const id = String(r.id ?? "").trim();
+    if (!RULE_ID_RE.test(id)) {
+      throw new ApiError(400, "PLAN_INVALID", `rules[${index}].id must match ${RULE_ID_RE}`);
+    }
+    if (seen.has(id)) throw new ApiError(400, "PLAN_INVALID", `duplicate rule id: ${id}`);
+    seen.add(id);
+    const role = String(r.role ?? "").trim();
+    if (!ROLE_KEY_RE.test(role)) {
+      throw new ApiError(400, "PLAN_INVALID", `rules[${index}].role is not a valid role_key`);
+    }
+    const matchRaw = r.match === void 0 ? {} : r.match;
+    if (!matchRaw || typeof matchRaw !== "object" || Array.isArray(matchRaw)) {
+      throw new ApiError(400, "PLAN_INVALID", `rules[${index}].match must be an object`);
+    }
+    const match = {};
+    for (const [key, value] of Object.entries(matchRaw)) {
+      if (key === "any") {
+        if (value === true) match.any = true;
+        continue;
+      }
+      if (!MATCH_KEYS.includes(key)) {
+        throw new ApiError(400, "PLAN_INVALID", `rules[${index}].match.${key} is not supported`);
+      }
+      const values = listOf(value);
+      if (values.length) match[key] = values;
+    }
+    if (match.any) fallbacks += 1;
+    const chainRaw = r.chain === void 0 ? [] : r.chain;
+    if (!Array.isArray(chainRaw)) {
+      throw new ApiError(400, "PLAN_INVALID", `rules[${index}].chain must be an array`);
+    }
+    const chain = chainRaw.map((step, stepIndex) => {
+      if (typeof step === "string") {
+        if (!ROLE_KEY_RE.test(step)) {
+          throw new ApiError(400, "PLAN_INVALID", `rules[${index}].chain[${stepIndex}] is not a role_key`);
+        }
+        return { role: step };
+      }
+      if (!step || typeof step !== "object" || Array.isArray(step)) {
+        throw new ApiError(400, "PLAN_INVALID", `rules[${index}].chain[${stepIndex}] must be a role or object`);
+      }
+      const s = step;
+      const stepRole = String(s.role ?? "").trim();
+      if (!ROLE_KEY_RE.test(stepRole)) {
+        throw new ApiError(400, "PLAN_INVALID", `rules[${index}].chain[${stepIndex}].role is not a valid role_key`);
+      }
+      const build = asSpec(s.build, `rules[${index}].chain[${stepIndex}].build`);
+      if (!build?.command && !build?.instruction) {
+        throw new ApiError(
+          400,
+          "PLAN_INVALID",
+          `rules[${index}].chain[${stepIndex}] must define build.command or build.instruction`
+        );
+      }
+      return {
+        role: stepRole,
+        phase: s.phase === void 0 ? void 0 : String(s.phase),
+        build,
+        capabilities: s.capabilities === void 0 ? void 0 : listOf(s.capabilities)
+      };
+    });
+    const taskType = r.task_type === void 0 ? "task.build" : String(r.task_type);
+    if (!taskType) throw new ApiError(400, "PLAN_INVALID", `rules[${index}].task_type is empty`);
+    return {
+      id,
+      priority: Number.isFinite(Number(r.priority)) ? Number(r.priority) : 0,
+      match,
+      task_type: taskType,
+      role,
+      build: asSpec(r.build, `rules[${index}].build`),
+      capabilities: r.capabilities === void 0 ? void 0 : listOf(r.capabilities),
+      chain
+    };
+  });
+  if (fallbacks > 1) {
+    throw new ApiError(400, "PLAN_INVALID", "at most one fallback rule (match.any) is allowed");
+  }
+  return { rules };
+}
+async function assertRolesExist(document) {
+  const keys = [
+    ...new Set(
+      document.rules.flatMap((r) => [r.role, ...(r.chain ?? []).map((s) => s.role)])
+    )
+  ];
+  const rows = await q(
+    `SELECT role_key, enabled FROM business_roles WHERE role_key = ANY($1::text[])`,
+    [keys]
+  );
+  const found = new Map(rows.map((r) => [r.role_key, r.enabled]));
+  const unknown = keys.filter((k) => !found.has(k));
+  if (unknown.length) {
+    throw new ApiError(422, "ROLE_UNKNOWN", `plan references unknown roles: ${unknown.join(", ")}`, {
+      unknown
+    });
+  }
+  const disabled = keys.filter((k) => found.get(k) === false);
+  if (disabled.length) {
+    throw new ApiError(422, "ROLE_DISABLED", `plan references disabled roles: ${disabled.join(", ")}`, {
+      disabled
+    });
+  }
+  const taskTypes = [
+    ...new Set(document.rules.flatMap((r) => [r.task_type ?? "task.build"]))
+  ];
+  const defs = await q(
+    `SELECT task_type FROM task_definitions WHERE task_type = ANY($1::text[])`,
+    [taskTypes]
+  );
+  const known = new Set(defs.map((d) => d.task_type));
+  const unknownTypes = taskTypes.filter((t) => !known.has(t));
+  if (unknownTypes.length) {
+    throw new ApiError(422, "TASK_TYPE_UNKNOWN", `plan references unknown task types: ${unknownTypes.join(", ")}`);
+  }
+}
+function templateIdFor(planId, ruleId) {
+  return `plan.${planId}.${ruleId}`;
+}
+function withRolePrompt(build, prompt) {
+  const rolePrompt = (prompt ?? "").trim();
+  if (!build || !rolePrompt) return build;
+  const mode = build.mode ?? (build.command ? "command" : "agent");
+  if (mode !== "agent") return build;
+  const instruction = build.instruction ?? "";
+  return { ...build, instruction: instruction ? `${instruction}
+
+[Role operating instructions]
+${rolePrompt}` : rolePrompt };
+}
+function compilePhases(rule, prompts) {
+  const firstReq = {};
+  const firstBuild = withRolePrompt(rule.build, prompts.get(rule.role));
+  if (firstBuild) firstReq.build = firstBuild;
+  if (rule.capabilities?.length) firstReq.capabilities = rule.capabilities;
+  firstReq.business_role = rule.role;
+  const phases = [
+    {
+      phase: "EXECUTE",
+      task_type: rule.task_type ?? "task.build",
+      business_role: rule.role,
+      requirements: firstReq
+    }
+  ];
+  (rule.chain ?? []).forEach((step, index) => {
+    const requirements = { business_role: step.role };
+    const stepBuild = withRolePrompt(step.build, prompts.get(step.role));
+    if (stepBuild || step.capabilities?.length) {
+      const build = { ...stepBuild ?? {} };
+      if (!build.mode) build.mode = build.command ? "command" : "agent";
+      if (build.workdir === void 0) build.workdir = void 0;
+      requirements.build = build;
+    }
+    if (step.capabilities?.length) requirements.capabilities = step.capabilities;
+    phases.push({
+      phase: step.phase ?? `STAGE_${index + 1}`,
+      task_type: "task.build",
+      business_role: step.role,
+      requirements
+    });
+  });
+  return phases;
+}
+async function compileTemplates(c, plan) {
+  const roleKeys = [
+    ...new Set(
+      plan.document.rules.flatMap((r) => [r.role, ...(r.chain ?? []).map((s) => s.role)])
+    )
+  ];
+  const roleRows = await q(
+    `SELECT role_key, operation_prompt FROM business_roles WHERE role_key = ANY($1::text[])`,
+    [roleKeys]
+  );
+  const prompts = new Map(roleRows.map((r) => [r.role_key, String(r.operation_prompt ?? "")]));
+  const ids = [];
+  for (const rule of plan.document.rules) {
+    const id = templateIdFor(plan.plan_id, rule.id);
+    ids.push(id);
+    const phases = compilePhases(rule, prompts);
+    await c.query(
+      `INSERT INTO workflow_templates
+         (workflow_template_id, name, version, phases)
+       VALUES ($1,$2,$3,$4::jsonb)
+       ON CONFLICT (workflow_template_id) DO UPDATE
+         SET name = EXCLUDED.name,
+             version = EXCLUDED.version,
+             phases = EXCLUDED.phases`,
+      [id, `${plan.name} / ${rule.id}`, String(plan.version), JSON.stringify(phases)]
+    );
+  }
+  return ids;
+}
+async function listPlans(project) {
+  return q(
+    `SELECT plan_id, project, name, version, status, created_by, created_at, updated_at,
+            jsonb_array_length(COALESCE(document->'rules', '[]'::jsonb))::int AS rule_count
+       FROM allocation_plans
+      WHERE ($1::text IS NULL OR project = $1)
+      ORDER BY project, created_at DESC`,
+    [project ?? null]
+  );
+}
+async function getPlan(planId) {
+  const row = await q1(`SELECT * FROM allocation_plans WHERE plan_id = $1`, [planId]);
+  if (!row) throw new ApiError(404, "PLAN_UNKNOWN", `plan not found: ${planId}`);
+  return row;
+}
+async function createPlan(input) {
+  const project = String(input.project ?? "").trim();
+  if (!project) throw new ApiError(400, "BAD_REQUEST", "project is required");
+  const name = String(input.name ?? "").trim();
+  if (!name) throw new ApiError(400, "BAD_REQUEST", "name is required");
+  const resolved = await resolveDocument({ project, document: input.document, document_text: input.document_text });
+  const document = normalizeDocument(resolved.document);
+  await assertRolesExist(document);
+  const planId = newId("plan");
+  return tx(async (c) => {
+    const row = (await c.query(
+      `INSERT INTO allocation_plans
+           (plan_id, project, name, version, status, document, document_text, created_by)
+         VALUES ($1,$2,$3,1,'DRAFT',$4::jsonb,$5,$6)
+         RETURNING *`,
+      [planId, project, name, JSON.stringify(document), resolved.text, input.created_by ?? "operator"]
+    )).rows[0];
+    return row;
+  });
+}
+async function updatePlan(planId, input) {
+  const existing = await getPlan(planId);
+  const project = input.project === void 0 ? String(existing.project) : String(input.project);
+  const existingText = String(existing.document_text ?? "");
+  let document;
+  let text = existingText;
+  if (input.document === void 0 && input.document_text !== void 0 && input.document_text.trim() !== existingText.trim()) {
+    const resolved = await resolveDocument({ project, document_text: input.document_text });
+    document = normalizeDocument(resolved.document);
+    text = resolved.text;
+  } else if (input.document === void 0) {
+    document = normalizeDocument(existing.document);
+  } else {
+    document = normalizeDocument(input.document);
+    text = input.document_text === void 0 ? existingText : String(input.document_text);
+  }
+  await assertRolesExist(document);
+  return tx(async (c) => {
+    const row = (await c.query(
+      `UPDATE allocation_plans
+            SET project = $2,
+                name = $3,
+                version = version + 1,
+                status = 'DRAFT',
+                document = $4::jsonb,
+                document_text = $5,
+                updated_at = app_now()
+          WHERE plan_id = $1
+          RETURNING *`,
+      [
+        planId,
+        project,
+        input.name === void 0 ? existing.name : String(input.name).trim() || existing.name,
+        JSON.stringify(document),
+        text
+      ]
+    )).rows[0];
+    return row;
+  });
+}
+async function activatePlan(planId) {
+  const plan = await getPlan(planId);
+  const document = normalizeDocument(plan.document);
+  await assertRolesExist(document);
+  return tx(async (c) => {
+    await c.query(
+      `UPDATE allocation_plans
+          SET status = 'DISABLED', updated_at = app_now()
+        WHERE project = $1 AND status = 'ACTIVE' AND plan_id <> $2`,
+      [plan.project, planId]
+    );
+    const row = (await c.query(
+      `UPDATE allocation_plans
+            SET status = 'ACTIVE', document = $2::jsonb, updated_at = app_now()
+          WHERE plan_id = $1
+          RETURNING *`,
+      [planId, JSON.stringify(document)]
+    )).rows[0];
+    const templates = await compileTemplates(c, {
+      plan_id: row.plan_id,
+      name: row.name,
+      version: row.version,
+      document
+    });
+    return { plan: row, templates };
+  });
+}
+async function previewPlan(input) {
+  const resolved = await resolveDocument({
+    project: String(input.project ?? "").trim(),
+    document_text: input.document_text
+  });
+  const document = normalizeDocument(resolved.document);
+  await assertRolesExist(document);
+  return document;
+}
+async function deactivatePlan(planId) {
+  const row = await q1(
+    `UPDATE allocation_plans SET status = 'DISABLED', updated_at = app_now()
+      WHERE plan_id = $1 RETURNING *`,
+    [planId]
+  );
+  if (!row) throw new ApiError(404, "PLAN_UNKNOWN", `plan not found: ${planId}`);
+  return row;
+}
+async function deletePlan(planId) {
+  const plan = await getPlan(planId);
+  if (plan.status === "ACTIVE") {
+    throw new ApiError(409, "PLAN_ACTIVE", "deactivate the plan before deleting it");
+  }
+  for (const rule of plan.document.rules ?? []) {
+    await q(`DELETE FROM workflow_templates WHERE workflow_template_id = $1`, [
+      templateIdFor(planId, rule.id)
+    ]);
+  }
+  await q(`DELETE FROM allocation_plans WHERE plan_id = $1`, [planId]);
+  return { deleted: planId };
+}
+function containsAny(actual, expected) {
+  const set = new Set(actual.map((v) => v.toLowerCase()));
+  return expected.some((v) => set.has(v.toLowerCase()));
+}
+function pathMatches(actual, prefixes) {
+  return actual.some((p) => prefixes.some((prefix) => p.startsWith(prefix)));
+}
+function ruleMatches(rule, input) {
+  const match = rule.match ?? {};
+  if (match.any === true || Object.keys(match).length === 0) return true;
+  const categories = listOf([input.category, input.subsystem].filter(Boolean));
+  if (match.category?.length && !containsAny(categories, match.category)) return false;
+  if (match.subsystem?.length && !containsAny(categories, match.subsystem)) return false;
+  if (match.task_type?.length) {
+    const type = input.task_type ?? "task.build";
+    if (!match.task_type.some((t) => t.toLowerCase() === type.toLowerCase())) return false;
+  }
+  if (match.path_prefix?.length && !pathMatches(input.paths ?? [], match.path_prefix)) {
+    return false;
+  }
+  if (match.keywords?.length) {
+    const text = `${input.instruction ?? ""}`.toLowerCase();
+    if (!match.keywords.some((k) => text.includes(k.toLowerCase()))) return false;
+  }
+  return true;
+}
+function specificity(rule) {
+  const match = rule.match ?? {};
+  if (match.any) return 0;
+  return Object.keys(match).filter((k) => k !== "any").length;
+}
+function matchRule(document, input) {
+  const matches = document.rules.map((rule, order) => ({ rule, order })).filter(({ rule }) => ruleMatches(rule, input)).sort(
+    (a, b) => Number(b.rule.priority ?? 0) - Number(a.rule.priority ?? 0) || specificity(b.rule) - specificity(a.rule) || a.order - b.order
+  );
+  if (!matches.length) {
+    throw new ApiError(422, "NO_MATCHING_RULE", "no rule in the active plan matches this request", {
+      tried: document.rules.map((r) => r.id)
+    });
+  }
+  return matches[0].rule;
+}
+function substituteWorkdir(template, project, role) {
+  return template.replaceAll("{project}", project).replaceAll("{role}", role);
+}
+function roleRequirements(role, project) {
+  const template = role.workdir_template ? String(role.workdir_template) : null;
+  return {
+    workdir: template ? substituteWorkdir(template, project, String(role.role_key)) : void 0,
+    allowed_paths: role.allowed_paths ?? [],
+    required_capabilities: role.required_capabilities ?? []
+  };
+}
+async function submitRequest(input) {
+  const project = String(input.project ?? "").trim();
+  if (!project) throw new ApiError(400, "BAD_REQUEST", "project is required");
+  const plan = input.plan_id ? await getPlan(input.plan_id) : await q1(
+    `SELECT * FROM allocation_plans WHERE project = $1 AND status = 'ACTIVE' LIMIT 1`,
+    [project]
+  );
+  if (!plan) {
+    throw new ApiError(404, "PLAN_NOT_ACTIVE", `no active allocation plan for project ${project}`);
+  }
+  if (!input.dry_run && plan.status !== "ACTIVE") {
+    throw new ApiError(409, "PLAN_NOT_ACTIVE", `plan ${plan.plan_id} is ${plan.status}; activate it first`);
+  }
+  if (plan.project !== project) {
+    throw new ApiError(422, "PLAN_PROJECT_MISMATCH", `plan belongs to ${plan.project}, not ${project}`);
+  }
+  const document = normalizeDocument(plan.document);
+  const rule = matchRule(document, input);
+  const allRoles = [rule.role, ...(rule.chain ?? []).map((s) => s.role)];
+  const roleRows = await q(
+    `SELECT * FROM business_roles WHERE role_key = ANY($1::text[])`,
+    [allRoles]
+  );
+  const roleByKey = new Map(roleRows.map((r) => [String(r.role_key), r]));
+  const missing = allRoles.filter((r) => !roleByKey.has(r));
+  if (missing.length) {
+    throw new ApiError(422, "ROLE_UNKNOWN", `plan references unknown roles: ${missing.join(", ")}`);
+  }
+  const firstRole = roleByKey.get(rule.role);
+  const firstRoleReq = roleRequirements(firstRole, project);
+  const instruction = String(input.instruction ?? "").trim();
+  const build = { ...rule.build ?? {}, ...input.build ?? {} };
+  if (instruction) build.instruction = instruction;
+  build.mode ??= build.command ? "command" : "agent";
+  if (build.workdir === void 0 && firstRoleReq.workdir) build.workdir = firstRoleReq.workdir;
+  if (build.workdir === void 0) {
+    throw new ApiError(
+      422,
+      "WORKDIR_MISSING",
+      `role ${rule.role} has no workdir_template and the request does not set build.workdir`
+    );
+  }
+  if (build.mode === "agent" && !build.instruction) {
+    throw new ApiError(422, "INSTRUCTION_MISSING", "an agent build needs a non-empty instruction");
+  }
+  const rolePrompt = String(firstRole.operation_prompt ?? "").trim();
+  if (build.mode === "agent" && rolePrompt) {
+    build.instruction = `${build.instruction}
+
+[Role operating instructions]
+${rolePrompt}`;
+  }
+  if (build.mode === "command" && !build.command) {
+    throw new ApiError(422, "COMMAND_MISSING", "a command build needs requirements.build.command");
+  }
+  const capabilities = [
+    .../* @__PURE__ */ new Set([
+      "code.build",
+      "shell",
+      ...firstRoleReq.required_capabilities,
+      ...rule.capabilities ?? [],
+      ...input.capabilities ?? []
+    ])
+  ];
+  const matched = {
+    plan_id: plan.plan_id,
+    plan_version: plan.version,
+    rule_id: rule.id,
+    role: rule.role,
+    chain: (rule.chain ?? []).map((s) => s.role)
+  };
+  if (input.dry_run) {
+    return { dry_run: true, matched, build, capabilities };
+  }
+  const requirements = {
+    business_role: rule.role,
+    plan_id: plan.plan_id,
+    rule_id: rule.id,
+    project,
+    requester: input.requester ?? "operator",
+    allowed_paths: firstRoleReq.allowed_paths,
+    capabilities,
+    build
+  };
+  const workflow = await createWorkflowRun({
+    workflow_template_id: templateIdFor(plan.plan_id, rule.id),
+    priority_class: input.priority_class ?? 1,
+    requirements,
+    plan_id: plan.plan_id
+  });
+  return {
+    matched,
+    workflow_run_id: workflow.run.workflow_run_id,
+    task_id: workflow.task.task_id,
+    status: workflow.task.status,
+    template_id: templateIdFor(plan.plan_id, rule.id)
+  };
+}
+
 // scheduler/src/http/server.ts
 function bodyAs(body) {
   return body;
@@ -10539,6 +11582,42 @@ route(
   },
   { auth: true, scopes: ["config:read"] }
 );
+route("GET", "/v1/business-roles", async (c) => ({
+  items: await listBusinessRoles(c.query.get("project") ?? void 0)
+}));
+route("GET", "/v1/roles/coverage", async (c) => ({
+  items: await roleCoverage(c.query.get("project") ?? void 0)
+}));
+route("POST", "/v1/business-roles", (c) => createBusinessRole(bodyAs(c.body)));
+route("GET", "/v1/business-roles/:id", (c) => getBusinessRole(c.params.id));
+route(
+  "PUT",
+  "/v1/business-roles/:id",
+  (c) => updateBusinessRole(c.params.id, bodyAs(c.body))
+);
+route("DELETE", "/v1/business-roles/:id", (c) => deleteBusinessRole(c.params.id));
+route("GET", "/v1/instances/:id/roles", async (c) => ({
+  items: await listInstanceRoles(c.params.id)
+}));
+route("PUT", "/v1/instances/:id/roles", (c) => {
+  const body = bodyAs(c.body);
+  return setInstanceRoles(c.params.id, body.roles ?? [], body.actor ?? "operator");
+});
+route("GET", "/v1/plans", async (c) => ({
+  items: await listPlans(c.query.get("project") ?? void 0)
+}));
+route(
+  "POST",
+  "/v1/plans/compile",
+  (c) => previewPlan(bodyAs({ project: c.body.project, document_text: c.body.document_text }))
+);
+route("POST", "/v1/plans", (c) => createPlan(bodyAs(c.body)));
+route("GET", "/v1/plans/:id", (c) => getPlan(c.params.id));
+route("PUT", "/v1/plans/:id", (c) => updatePlan(c.params.id, bodyAs(c.body)));
+route("POST", "/v1/plans/:id/activate", (c) => activatePlan(c.params.id));
+route("POST", "/v1/plans/:id/deactivate", (c) => deactivatePlan(c.params.id));
+route("DELETE", "/v1/plans/:id", (c) => deletePlan(c.params.id));
+route("POST", "/v1/requests", (c) => submitRequest(bodyAs(c.body)));
 route(
   "GET",
   "/v1/instances/:id/grant",
@@ -10659,6 +11738,7 @@ route("GET", "/v1/tasks", async (c) => ({
     status: c.query.get("status") ?? void 0,
     task_type: c.query.get("task_type") ?? void 0,
     role: c.query.get("role") ?? void 0,
+    business_role: c.query.get("business_role") ?? void 0,
     limit: c.query.get("limit") ? Number(c.query.get("limit")) : void 0
   })
 }));

@@ -201,7 +201,7 @@ var SchedulerClient = class {
       });
     } catch (e) {
       const msg = e?.message ?? String(e);
-      throw new SchedulerError(0, msg.includes("timed out") || msg.includes("\u8D85\u65F6") ? "TIMEOUT" : "SCHEDULER_UNREACHABLE", msg);
+      throw new SchedulerError(0, msg.includes("timed out") ? "TIMEOUT" : "SCHEDULER_UNREACHABLE", msg);
     }
   }
   register(input) {
@@ -331,9 +331,6 @@ var TaskFailed = class extends Error {
   code;
   detail;
 };
-
-// host-runtime/src/roles/builder.ts
-import path3 from "node:path";
 
 // host-runtime/src/roles/common.ts
 import { createHash } from "node:crypto";
@@ -489,6 +486,33 @@ function tail(text, max = 4e3) {
   return text.length <= max ? text : text.slice(-max);
 }
 
+// host-runtime/src/roles/workdir.ts
+import path3 from "node:path";
+function resolveWorkdir(root, rel) {
+  if (!rel || rel === ".") return root;
+  const base = path3.resolve(root);
+  const workspaceRoot = path3.dirname(base);
+  const requested = path3.isAbsolute(rel) ? path3.resolve(rel) : path3.resolve(base, rel);
+  const mounted = projectRoots().some(
+    (allowedRoot) => requested === allowedRoot || requested.startsWith(allowedRoot + path3.sep)
+  );
+  const abs = mounted ? requested : requested === workspaceRoot ? base : requested.startsWith(workspaceRoot + path3.sep) ? path3.resolve(base, path3.relative(workspaceRoot, requested)) : requested;
+  if (abs !== base && !abs.startsWith(base + path3.sep)) {
+    const allowed = projectRoots().some((allowedRoot) => abs === allowedRoot || abs.startsWith(allowedRoot + path3.sep));
+    if (!allowed) {
+      throw new TaskFailed("BUILD_WORKDIR_INVALID", `Workdir escapes the boundary: ${rel}`);
+    }
+  }
+  return abs;
+}
+function projectRoots() {
+  return (process.env.BUILDER_PROJECT_ROOTS ?? "").split(",").map((s) => s.trim()).filter(Boolean).map((s) => path3.resolve(s));
+}
+function positiveInt(value, fallback2) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback2;
+}
+
 // host-runtime/src/roles/builder.ts
 var taskBuild = async (task, ctx) => {
   const raw = task.requirements?.build ?? {};
@@ -505,6 +529,9 @@ var taskBuild = async (task, ctx) => {
     );
   }
   if (!command) return legacyManifest(task, ctx);
+  const maxTimeoutSeconds = positiveInt(process.env.BUILD_TIMEOUT_SECONDS, 12 * 60 * 60);
+  const requestedTimeoutSeconds = positiveInt(raw.timeout_seconds, maxTimeoutSeconds);
+  const timeoutMs = Math.min(requestedTimeoutSeconds, maxTimeoutSeconds) * 1e3;
   ctx.progress(5, `Executing in the builder: ${command.slice(0, 80)}`);
   const cwd = resolveWorkdir(ctx.workspaceDir, workdir);
   const result = await runShell({
@@ -515,10 +542,16 @@ var taskBuild = async (task, ctx) => {
       PLATFORM_INSTANCE_ID: ctx.instanceId,
       PLATFORM_TASK_ID: task.task_id,
       PLATFORM_TASK_TYPE: task.task_type,
-      PLATFORM_WORKSPACE: ctx.workspaceDir
+      PLATFORM_WORKSPACE: ctx.workspaceDir,
+      // Role-based plan stages: review/test commands act on the artifact or
+      // change package produced by the first task of the workflow.
+      PLATFORM_ORIGIN_TASK_ID: String(task.requirements?.origin_task_id ?? task.task_id),
+      PLATFORM_BUSINESS_ROLE: String(task.requirements?.business_role ?? ""),
+      PLATFORM_PROJECT: String(task.requirements?.project ?? ""),
+      PLATFORM_PLAN_ID: String(task.requirements?.plan_id ?? "")
     }),
     signal: ctx.signal,
-    timeoutMs: 15 * 6e4
+    timeoutMs
   });
   if (ctx.signal.aborted) {
     throw new TaskAborted(taskAbortReason(ctx.signal));
@@ -543,10 +576,15 @@ var taskBuild = async (task, ctx) => {
   ].join("\n");
   const artifact = await ctx.uploadArtifact(log, MEDIA.log);
   if (result.timedOut) {
-    throw new TaskFailed("BUILD_TIMEOUT", "Build command exceeded 15 minutes and was terminated", {
-      command,
-      log_artifact_id: artifact.artifact_id
-    });
+    throw new TaskFailed(
+      "BUILD_TIMEOUT",
+      `Build command exceeded ${Math.round(timeoutMs / 6e4)} minutes and was terminated`,
+      {
+        command,
+        timeout_seconds: Math.round(timeoutMs / 1e3),
+        log_artifact_id: artifact.artifact_id
+      }
+    );
   }
   if (result.exitCode !== 0) {
     throw new TaskFailed("BUILD_FAILED", `Build command exited with code ${result.exitCode}`, {
@@ -576,17 +614,6 @@ var taskBuild = async (task, ctx) => {
 function taskAbortReason(signal) {
   const r = signal.reason;
   return r === "cancelled" || r === "shutdown" ? r : "lease_lost";
-}
-function resolveWorkdir(root, rel) {
-  if (!rel || rel === ".") return root;
-  const base = path3.resolve(root);
-  const workspaceRoot = path3.dirname(base);
-  const requested = path3.isAbsolute(rel) ? path3.resolve(rel) : path3.resolve(base, rel);
-  const abs = requested === workspaceRoot ? base : requested.startsWith(workspaceRoot + path3.sep) ? path3.resolve(base, path3.relative(workspaceRoot, requested)) : requested;
-  if (abs !== base && !abs.startsWith(base + path3.sep)) {
-    throw new TaskFailed("BUILD_WORKDIR_INVALID", `Workdir escapes the boundary: ${rel}`);
-  }
-  return abs;
 }
 async function legacyManifest(task, ctx) {
   ctx.progress(10, "Preparing workspace");
@@ -861,15 +888,15 @@ function chatExecutorFor(role) {
     const lower = message.toLowerCase();
     const agent = task.agent?.profile_id ? `${task.agent.profile_id}${task.agent.version ? `@${task.agent.version}` : ""}` : "no Agent bound";
     let reply;
-    if (lower.includes("agent") || message.includes("\u6A21\u578B") || message.includes("\u7ED1\u5B9A")) {
+    if (lower.includes("agent") || lower.includes("model") || lower.includes("bind")) {
       reply = `I am ${persona.name}. This workstation is bound to ${agent}. I only see this conversation and the history explicitly passed in; I do not read other sessions in the workflow.`;
-    } else if (message.includes("\u8FDB\u5EA6") || message.includes("\u72B6\u6001") || message.includes("\u5FD9")) {
+    } else if (lower.includes("progress") || lower.includes("status") || lower.includes("busy")) {
       reply = `This message is itself a task.chat.${role} task; check the task center for progress. ${persona.line}`;
-    } else if (message.includes("ssh") || message.includes("\u7EC8\u7AEF") || message.includes("shell")) {
+    } else if (lower.includes("ssh") || lower.includes("terminal") || lower.includes("shell")) {
       reply = role === "builder" ? "The terminal is full SSH: root login, arbitrary commands, apt and compilation available. The address and port are in the builder details." : "The scheduler does not run builds; it only queues and dispatches. SSH is on the builder.";
-    } else if (message.includes("\u78C1\u76D8") || message.includes("\u7A7A\u95F4")) {
+    } else if (lower.includes("disk") || lower.includes("space")) {
       reply = "Run df -h in the terminal to see it; it is recommended to clear the builder artifact directory weekly.";
-    } else if (message.includes("\u4F60\u597D") || lower.includes("hello") || lower.includes("hi")) {
+    } else if (lower.includes("hello") || lower.includes("hi")) {
       reply = `Hello, I am ${persona.name}, responsible for ${persona.duty}. ${persona.line}`;
     } else {
       reply = `Received. I am ${persona.name}, responsible for ${persona.duty}. No chat-capable model is currently bound, so this is a deterministic reply generated by the platform; once an Agent Profile is configured, the same task will be handed to the designated Agent.`;
@@ -2198,6 +2225,88 @@ function sha256(s) {
   return `sha256:${createHash2("sha256").update(s).digest("hex")}`;
 }
 
+// host-runtime/src/roles/hooks.ts
+function buildSpec(task) {
+  const raw = task.requirements?.build;
+  return raw && typeof raw === "object" ? raw : {};
+}
+function stageHookCommand(task, kind) {
+  const key = `${kind}_command`;
+  const fromBuild = buildSpec(task)[key];
+  if (typeof fromBuild === "string" && fromBuild.trim()) return fromBuild.trim();
+  const fromRequirements = (task.requirements ?? {})[key];
+  if (typeof fromRequirements === "string" && fromRequirements.trim()) return fromRequirements.trim();
+  return "";
+}
+function hookTimeoutSeconds(task, kind) {
+  const cap = Number(process.env.PLATFORM_HOOK_TIMEOUT_SECONDS ?? 30 * 60);
+  const ceiling = Number.isFinite(cap) && cap > 0 ? cap : 30 * 60;
+  const spec = buildSpec(task);
+  const requested = Number(spec[`${kind}_timeout_seconds`]);
+  if (Number.isFinite(requested) && requested > 0) return Math.min(requested, ceiling);
+  return ceiling;
+}
+function hookEnv(task, ctx, workspace, extraEnv) {
+  const requirements = task.requirements ?? {};
+  return baseEnv({
+    ...extraEnv,
+    PLATFORM_INSTANCE_ID: ctx.instanceId,
+    PLATFORM_ATTEMPT_ID: task.attempt_id,
+    PLATFORM_TASK_ID: task.task_id,
+    PLATFORM_TASK_TYPE: task.task_type,
+    PLATFORM_WORKSPACE: workspace,
+    PLATFORM_PROJECT: String(requirements.project ?? ""),
+    PLATFORM_BUSINESS_ROLE: String(requirements.business_role ?? ""),
+    PLATFORM_ORIGIN_TASK_ID: String(requirements.origin_task_id ?? task.task_id),
+    PLATFORM_PLAN_ID: String(requirements.plan_id ?? "")
+  });
+}
+async function runStageHook(task, ctx, kind, workspace) {
+  const command = stageHookCommand(task, kind);
+  if (!command) return false;
+  const spec = buildSpec(task);
+  const extraEnv = spec.env && typeof spec.env === "object" ? Object.fromEntries(
+    Object.entries(spec.env).filter(([, v]) => typeof v === "string").map(([k, v]) => [k, String(v)])
+  ) : {};
+  const timeoutSeconds = hookTimeoutSeconds(task, kind);
+  const label = kind === "prepare" ? "prepare" : "post";
+  ctx.log(`stage hook ${label}: ${command.slice(0, 200)} (cwd ${workspace})`);
+  const result = await runShell({
+    command,
+    cwd: workspace,
+    env: hookEnv(task, ctx, workspace, extraEnv),
+    signal: ctx.signal,
+    timeoutMs: timeoutSeconds * 1e3
+  });
+  if (ctx.signal.aborted) {
+    throw new TaskAborted(ctx.signal.reason === "cancelled" || ctx.signal.reason === "shutdown" ? ctx.signal.reason : "lease_lost");
+  }
+  for (const line of result.stdout.split("\n").slice(-40)) {
+    if (line.trim()) ctx.log(`  ${label}: ${line.slice(0, 500)}`);
+  }
+  for (const line of result.stderr.split("\n").slice(-40)) {
+    if (line.trim()) ctx.log(`  ${label} (stderr): ${line.slice(0, 500)}`);
+  }
+  const code = kind === "prepare" ? "STAGE_PREPARE_FAILED" : "STAGE_POST_FAILED";
+  if (result.timedOut) {
+    throw new TaskFailed(code, `${label} hook exceeded ${timeoutSeconds}s and was terminated`, {
+      command,
+      timeout_seconds: timeoutSeconds,
+      stdout_tail: tail(result.stdout),
+      stderr_tail: tail(result.stderr)
+    });
+  }
+  if (result.exitCode !== 0) {
+    throw new TaskFailed(code, `${label} hook exited with code ${result.exitCode}`, {
+      exit_code: result.exitCode,
+      command,
+      stdout_tail: tail(result.stdout),
+      stderr_tail: tail(result.stderr)
+    });
+  }
+  return true;
+}
+
 // host-runtime/src/agent-runtime/agent-executor.ts
 function phaseFor(taskType) {
   if (taskType === "task.build") return "EXECUTE";
@@ -2244,11 +2353,11 @@ function sanitizePart(value, fallback2, max) {
   const cleaned = String(value ?? "").replace(/[^\p{L}\p{N}._-]+/gu, "_").replace(/^\.+/, "").slice(0, max);
   return cleaned || fallback2;
 }
-async function materializeUpstreamArtifacts(task, ctx) {
+async function materializeUpstreamArtifacts(task, ctx, workspace) {
   const requirements = task.requirements ?? {};
   const raw = requirements.upstream_artifacts;
   if (!Array.isArray(raw) || raw.length === 0) return task;
-  const dir = path8.join(ctx.workspaceDir, "upstream");
+  const dir = path8.join(workspace, "upstream");
   fs7.mkdirSync(dir, { recursive: true });
   const materialized = [];
   const seen = /* @__PURE__ */ new Set();
@@ -2328,11 +2437,18 @@ async function runAgentTask(task, ctx, opts) {
   const remaining = Number.isFinite(deadline) ? Math.max(1, Math.floor((deadline - Date.now()) / 1e3)) : maxWall;
   const wallSeconds = Math.max(1, Math.min(maxWall, remaining));
   const maxTurns = profile.limits?.max_turns;
+  const buildSpec2 = task.requirements?.build ?? {};
+  const declaredWorkdir = typeof buildSpec2.workdir === "string" ? buildSpec2.workdir.trim() : "";
+  const workspace = resolveWorkdir(ctx.workspaceDir, declaredWorkdir);
+  if (workspace !== ctx.workspaceDir) {
+    fs7.mkdirSync(workspace, { recursive: true });
+    ctx.log(`Agent workdir: ${workspace}`);
+  }
   const guard = new ToolGuard({
     instanceId: ctx.instanceId,
     attemptId: task.attempt_id,
     taskId: task.task_id,
-    workspace: ctx.workspaceDir,
+    workspace,
     profile,
     apiProfiles: opts.profiles.api,
     phase,
@@ -2374,7 +2490,7 @@ async function runAgentTask(task, ctx, opts) {
       } else if (e.type === "artifact") {
         const p = String(e.path ?? "");
         try {
-          assertInsideWorkspace(p.replace(/^\.\/+/, ""), ctx.workspaceDir);
+          assertInsideWorkspace(p.replace(/^\.\/+/, ""), workspace);
           artifactPaths.push({ name: String(e.name ?? "artifact"), path: p });
         } catch (err) {
           artifactError = new TaskFailed(
@@ -2396,7 +2512,7 @@ async function runAgentTask(task, ctx, opts) {
     PLATFORM_ATTEMPT_ID: task.attempt_id,
     PLATFORM_TASK_ID: task.task_id,
     PLATFORM_TASK_TYPE: task.task_type,
-    PLATFORM_WORKSPACE: ctx.workspaceDir,
+    PLATFORM_WORKSPACE: workspace,
     PLATFORM_TOOL_TOKEN: toolToken,
     PLATFORM_PHASE: phase,
     PLATFORM_DEADLINE: task.deadline_at ?? "",
@@ -2426,20 +2542,22 @@ async function runAgentTask(task, ctx, opts) {
     env.ANTHROPIC_BASE_URL = `${opts.apiAdapter.url}/${encodeURIComponent(modelProfileId)}`;
     env.ANTHROPIC_API_KEY = "platform-api-adapter";
   }
-  const adapter = profile.adapter === "http-local" ? new HttpLocalAdapter(profile, hooks) : new StdioAdapter(profile, ctx.workspaceDir, env, hooks);
+  const adapter = profile.adapter === "http-local" ? new HttpLocalAdapter(profile, hooks) : new StdioAdapter(profile, workspace, env, hooks);
   let aborted = false;
   const onAbort = () => {
     aborted = true;
     void adapter.cancel(String(ctx.signal.reason ?? "cancelled"));
   };
   ctx.signal.addEventListener("abort", onAbort, { once: true });
-  let agentTask = await materializeAttachments(task, ctx.workspaceDir);
-  if (agentTask !== task) {
-    const count = agentTask.requirements.build.attachments;
-    ctx.log(`Wrote ${count.length} attachments to workspace attachments/`);
-  }
-  agentTask = await materializeUpstreamArtifacts(agentTask, ctx);
+  let agentTask = task;
   try {
+    await runStageHook(agentTask, ctx, "prepare", workspace);
+    agentTask = await materializeAttachments(agentTask, workspace);
+    if (agentTask !== task) {
+      const count = agentTask.requirements.build.attachments;
+      ctx.log(`Wrote ${count.length} attachments to workspace attachments/`);
+    }
+    agentTask = await materializeUpstreamArtifacts(agentTask, ctx, workspace);
     await adapter.start();
     const prepared = await adapter.prepare(
       {
@@ -2490,11 +2608,12 @@ async function runAgentTask(task, ctx, opts) {
         result?.error?.detail
       );
     }
+    await runStageHook(agentTask, ctx, "post", workspace);
     const outputs = [];
     for (const out of result.outputs ?? []) {
       const rel = out.path.replace(/^\.\/+/, "");
-      assertInsideWorkspace(rel, ctx.workspaceDir);
-      const file = path8.join(ctx.workspaceDir, rel);
+      assertInsideWorkspace(rel, workspace);
+      const file = path8.join(workspace, rel);
       if (!fs7.existsSync(file)) {
         throw new TaskFailed("AGENT_OUTPUT_MISSING", `Artifact declared by the Agent does not exist: ${rel}`);
       }
@@ -2940,7 +3059,9 @@ var Agent = class {
       workspaceDir = path10.join(this.tuning.workspaceDir, a.attempt_id);
       fs9.mkdirSync(workspaceDir, { recursive: true });
       const profiles = this.tuning.profiles;
-      const useAgent = profiles ? supportsTask(profiles.agent, a.task_type) && !a.task_type.startsWith("task.console.") : false;
+      const buildSpec2 = a.requirements?.build ?? {};
+      const buildMode = typeof buildSpec2.mode === "string" ? buildSpec2.mode : void 0;
+      const useAgent = profiles ? supportsTask(profiles.agent, a.task_type) && !a.task_type.startsWith("task.console.") && buildMode !== "command" : false;
       if (useAgent) {
         this.log(
           `${a.task_id} executed by Agent ${profiles.agent.agent_profile_id}@${profiles.agent.version} (${profiles.agent.adapter})`
@@ -3267,7 +3388,7 @@ var agents = instances.map((i) => {
   const profiles = profilesFor(i);
   if (profiles) {
     console.log(
-      `  ${i.instance_id}: ${profiles.agent.agent_profile_id}@${profiles.agent.version} (${profiles.agent.adapter})\uFF0CAPI ${[...profiles.boundApiIds].join(",") || "-"}`
+      `  ${i.instance_id}: ${profiles.agent.agent_profile_id}@${profiles.agent.version} (${profiles.agent.adapter}), API ${[...profiles.boundApiIds].join(",") || "-"}`
     );
   }
   return new Agent(i, client, {

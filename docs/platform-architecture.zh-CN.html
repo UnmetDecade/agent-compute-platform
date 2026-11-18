@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>多节点 AI Agent 计算与调度平台 · 架构图</title>
+<title>智能任务调度系统 · 架构图</title>
 <style>
   :root {
     --bg: #f3f3f7;
@@ -146,18 +146,23 @@
 
   <header>
     <div class="eyebrow"><i></i>平台架构</div>
-    <h1>多节点 AI Agent 计算与调度平台</h1>
+    <h1>智能任务调度系统</h1>
     <p class="lede">
       PCS 控制面管理主机、部署与 Agent / API 档案，密钥只保存 Secret Store 引用；
       主机侧 host-runtime 执行签名命令；调度机按递归树派发任务，结点调度机逐级汇总能力；
       主机可以并入另一台主机组成联邦，跨调度机的任务只下推、不复制。
       局域网设备可以拿侧载令牌走同一条任务链路，每个任务都能通过附件与产物通道收发文件。
+      在执行角色之上，运维定义业务角色和一份分配计划，决定哪类请求交给谁；
+      调度机在保存时编译计划，并在认领阶段检查工作目录互斥。
     </p>
     <div class="chips">
       <span class="chip accent">控制面 PCS</span>
       <span class="chip accent">根调度机</span>
       <span class="chip accent">结点调度机</span>
       <span class="chip green">叶构建机</span>
+      <span class="chip green">业务角色</span>
+      <span class="chip green">分配计划</span>
+      <span class="chip">工作目录互斥</span>
       <span class="chip">Agent / API 档案</span>
       <span class="chip">Secret Store</span>
       <span class="chip">MCP builders</span>
@@ -196,7 +201,7 @@
         <text class="t2" x="60" y="92">管理应用（浏览器）</text>
         <text class="s2" x="60" y="116">AI Agent 工作室 · 构建机 · 任务</text>
         <text class="s2" x="60" y="138">对话 · 终端 · 按主机折叠</text>
-        <text class="s2" x="60" y="160" fill="#8a8d99">单页应用 · 无登录角色</text>
+        <text class="s2" x="60" y="160" fill="#8a8d99">业务角色 · 计划 · 队列</text>
         <path class="edge-strong" d="M300,125 H400"/>
         <text class="lbl" x="350" y="112" text-anchor="middle">HTTPS</text>
 
@@ -660,6 +665,18 @@
     <article class="card">
       <h3><i>15</i>信任边界</h3>
       <p>明文令牌只展示一次；删除或到期在下一次请求即生效。在线状态最多 30 秒写一次，界面 120 秒内算在线。侧载能看到的构建机就是主机根调度机的子树，也正是任务实际能跑的范围。</p>
+    </article>
+    <article class="card">
+      <h3><i>16</i>业务角色</h3>
+      <p>执行角色仍然是 <code>scheduler</code> 与 <code>builder</code>。运维定义业务角色（<code>ui-dev</code>、<code>code-review</code>、<code>test-bench</code>……），每个角色只需要显示名称、说明和一段"怎么操作"的自然语言，再按权重分配给构建机。构建机启动时是通用的，镜像里不预置任何业务角色。</p>
+    </article>
+    <article class="card">
+      <h3><i>17</i>分配计划</h3>
+      <p>每个项目一份计划，用自然语言写成。保存时调度器调用一次模型（Anthropic 兼容接口，脚本可用 <code>POST /v1/plans/compile</code> 预览）把它编译成确定性规则：优先级 → 特异度 → 声明顺序。请求到达时不调用模型；命中规则的第一个角色先执行，链路依次成为工作流阶段。激活后规则生效，编辑则退回草稿。</p>
+    </article>
+    <article class="card">
+      <h3><i>18</i>工作目录互斥</h3>
+      <p>所有构建机可以挂载同一棵项目树。认领任务时，调度器把任务的 <code>requirements.build.workdir</code> 与所有活动租约比较；完全相同、互为父目录或子目录都会被 <code>WORKDIR_IN_USE</code> 拒绝，并指出目录与占用实例。被阻塞的任务退避重试，占用结束后自动放行。</p>
     </article>
   </div>
 
