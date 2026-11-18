@@ -978,7 +978,7 @@ const ZH: Record<string, string> = {
   "Why is this task queued?": "为什么这个任务在排队？",
   "With SSH off, sshd is not started and no SSH port is mapped; with chat off, the builder no longer accepts chat tasks. Both can be changed later on the detail page, which recreates the container.": "关闭 SSH 后不再启动 sshd，也不映射 SSH 端口；关闭对话后构建机不再接收聊天任务。之后可以在详情页修改，修改会重建容器。",
   "With SSH off, sshd is not started and no SSH port is mapped; with chat off, the scheduler no longer accepts chat tasks. Both can be changed later on the detail page, which recreates the container.": "关闭 SSH 后不再启动 sshd，也不映射 SSH 端口；关闭对话后调度机不再接收聊天任务。之后可以在详情页修改，修改会重建容器。",
-  "Work capacity: the scheduler picks builders by task difficulty": "工作能力值：调度机按任务难度选择构建机",
+  "Work capacity: gates task difficulty and prefers stronger idle builders inside the same business role": "工作能力值：用于任务难度门槛，并在同一业务角色内优先选择更强的空闲构建机",
   "Workdir template": "工作目录模板",
   "Workflow": "工作流",
   "Working": "工作",

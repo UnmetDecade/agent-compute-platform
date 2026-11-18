@@ -440,7 +440,7 @@
         <text class="mono" x="1104" y="662">W = w1·核心数 + w2·主频 + w3·内存</text>
         <text class="mono" x="1104" y="684">  + w4·存储 + w5·模型能力 + w6·API 能力</text>
         <text class="s2" x="1104" y="714">创建构建机时计算上报，权重归一化后得到可比较分值。</text>
-        <text class="s2" x="1104" y="738">派发：任务难度 D ≤ 构建机 W，取余量最小者。</text>
+        <text class="s2" x="1104" y="738">派发：角色定候选，W 卡难度，同角色内强者优先。</text>
         <text class="s2" x="1104" y="762">汇总：ΣW = Σ叶构建机 W + Σ子调度机 ΣW（递归）。</text>
         <text class="s2" x="1104" y="786" fill="#8a8d99">根调度机看到的 168，就是整个联邦的可用能力。</text>
 
@@ -591,7 +591,7 @@
         <text class="t2" x="1084" y="96">中继语义</text>
         <text class="s2" x="1084" y="128">1. 带目标实例：本机有该实例就留本机；否则在直接子结点名册里找，逐跳下推。</text>
         <text class="s2" x="1084" y="164">2. 不带目标实例：本机有在线且 W ≥ D 的构建机就留本机；否则按容量挑子结点。</text>
-        <text class="s2" x="1100" y="190" fill="#8a8d99">D &gt; 0：优先 max_builder_score 刚好够用的（升序）。</text>
+        <text class="s2" x="1100" y="190" fill="#8a8d99">中继 D &gt; 0：优先 max_builder_score 刚好够用的（升序）。</text>
         <text class="s2" x="1100" y="216" fill="#8a8d99">D = 0：优先更闲的子结点（idle_builder_count 降序）。</text>
         <text class="s2" x="1084" y="252">3. 只下推、不复制：父任务保持 QUEUED，领取候选排除。</text>
         <text class="s2" x="1084" y="288">4. 去重：子任务用 relay_parent_task_id 唯一约束，重复投递不会建第二条。</text>
@@ -619,8 +619,8 @@
       <p><code>W = round(1000 × Σ(权重 × min(值, 上限) / 上限))</code>：CPU 30%（8 核）、频率 15%（4 GHz）、内存 20%（32 GB）、存储 10%（256 GB）、模型 15%（10）、API 10%（10）。调度机不参与 W，固定 0。</p>
     </article>
     <article class="card">
-      <h3><i>4</i>按难度派发</h3>
-      <p>任务带难度 <code>D</code>（0–1000，0 = 不限）。调度机只把任务交给 <code>W ≥ D</code> 的构建机，并优先选余量最小的，避免大机器被小任务占住。</p>
+      <h3><i>4</i>先角色、后难度</h3>
+      <p>任务带难度 <code>D</code>（0–1000，0 = 不限）。业务角色决定哪些构建机可以接；在候选集内还需 <code>W ≥ D</code>，且任务出现后的前 30 秒，空闲构建机会让给同一角色里 W 更高的空闲机。跨节点时，父结点优先选刚好够用的子结点。</p>
     </article>
     <article class="card">
       <h3><i>5</i>逐级汇总</h3>

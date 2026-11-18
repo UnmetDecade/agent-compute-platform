@@ -135,6 +135,19 @@ H_res = clamp(1 − max(U_mem, U_cpu), h_min, 1)
 
 任意两个分数只有在 `capability_schema_version` 相同时才可比较。当前实现使用版本 `1`（[`repo/resources.ts:496`](../scheduler/src/repo/resources.ts#L496)）。
 
+### 2.5 业务角色分配下 `W` 还决定什么
+
+候选集由业务角色和项目的分配计划决定，`W` 不能越过它们。在候选集内部，`W` 仍决定四件事：
+
+| 决策 | 规则 | 代码位置 |
+|---|---|---|
+| 难度资格 | 任务带难度 `D`（0 表示不限）时，`D > W_dispatch` 的实例跳过该任务 | [`claim.ts:340`](../scheduler/src/core/claim.ts#L340) |
+| 让给更强的空闲机 | 任务出现后的前 30 秒内，若存在一个 `W` 严格更高、完全空闲、**且被分配了同一业务角色**的对等实例，当前实例先不领取 | [`claim.ts:187`](../scheduler/src/core/claim.ts#L187) |
+| 跨节点中继 | 父节点只把任务下推给 `max_builder_score ≥ D` 的子节点 | [`relay.ts:143`](../scheduler/src/core/relay.ts#L143) |
+| 容量视图 | `local_score` / `subtree_score` 汇总为主机卡片与调度机卡片上的 `ΣW` | [`repo/federation.ts`](../scheduler/src/repo/federation.ts) |
+
+管理界面已不再填写任务难度，所以界面创建的任务带 `D = 0`，直接通过第一道门槛；直接调用 `POST /v1/tasks` 的脚本仍可设置难度。让让逻辑会校验 `instance_roles`：不在任务业务角色内的空闲构建机永远挡不住一台合格实例——角色决定"谁可以接"，`W` 只在它们之间挑硬件更强的那台。
+
 ---
 
 ## 3. 静态模式

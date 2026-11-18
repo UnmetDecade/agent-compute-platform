@@ -135,6 +135,19 @@ Local eligibility also accepts `max(dispatch, live) ≥ D`, so a builder that ju
 
 Any two scores are comparable only when their `capability_schema_version` matches. The implementation uses version `1` ([`repo/resources.ts:496`](../scheduler/src/repo/resources.ts#L496)).
 
+### 2.5 What `W` decides under business-role allocation
+
+Business roles and the project's allocation plan choose the candidate set; `W` never overrides them. Inside that set it still decides four things:
+
+| Decision | Rule | Where |
+|---|---|---|
+| Difficulty eligibility | A task with difficulty `D` (0 = unlimited) is skipped while `D > W_dispatch` | [`claim.ts:340`](../scheduler/src/core/claim.ts#L340) |
+| Deferral to a stronger idle peer | During the first 30 s of a task, an idle instance declines it when a strictly higher-`W`, completely idle peer **assigned to the same business role** can take it | [`claim.ts:187`](../scheduler/src/core/claim.ts#L187) |
+| Cross-node relay | A parent pushes a task down only to a child whose `max_builder_score ≥ D` | [`relay.ts:143`](../scheduler/src/core/relay.ts#L143) |
+| Capacity view | `local_score` / `subtree_score` aggregate into `ΣW` on host and scheduler cards | [`repo/federation.ts`](../scheduler/src/repo/federation.ts) |
+
+The admin app no longer asks for task difficulty, so tasks created there carry `D = 0` and pass the first gate; scripts that call `POST /v1/tasks` directly can still set it. Deferral checks `instance_roles`, so an idle builder outside the task's business role never blocks a qualified one: roles decide who may take the task, and `W` only picks the stronger hardware among them.
+
 ---
 
 ## 3. Static mode

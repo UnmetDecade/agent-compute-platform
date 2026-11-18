@@ -443,7 +443,7 @@
         <text class="mono" x="1104" y="662">W = w1·cores + w2·clock + w3·memory</text>
         <text class="mono" x="1104" y="684">  + w4·storage + w5·model + w6·API</text>
         <text class="s2" x="1104" y="714">Computed when a builder is created; weights normalize to a comparable score.</text>
-        <text class="s2" x="1104" y="738">Dispatch: task difficulty D ≤ builder W; take the tightest fit.</text>
+        <text class="s2" x="1104" y="738">Dispatch: role → candidates; W gates D; stronger idle peer wins.</text>
         <text class="s2" x="1104" y="762">Aggregate: ΣW = Σ leaf W + Σ child scheduler ΣW (recursive).</text>
         <text class="s2" x="1104" y="786" fill="#8a8d99">The root's 168 is the whole federation's available capacity.</text>
 
@@ -594,7 +594,7 @@
         <text class="t2" x="1084" y="96">Relay semantics</text>
         <text class="s2" x="1084" y="128">1. Target instance: local if present, else the direct child rosters, hop by hop.</text>
         <text class="s2" x="1084" y="164">2. No target: local if a builder has W ≥ D; else pick a child by capacity.</text>
-        <text class="s2" x="1100" y="190" fill="#8a8d99">D &gt; 0: tightest fit first (max_builder_score ascending).</text>
+        <text class="s2" x="1100" y="190" fill="#8a8d99">Relay, D &gt; 0: tightest fit first (max_builder_score ascending).</text>
         <text class="s2" x="1100" y="216" fill="#8a8d99">D = 0: idler child first (idle_builder_count descending).</text>
         <text class="s2" x="1084" y="252">3. Push down, never copy: parent stays QUEUED and is excluded from claims.</text>
         <text class="s2" x="1084" y="288">4. Dedup: relay_parent_task_id is unique; redelivery never creates a second task.</text>
@@ -622,8 +622,8 @@
       <p><code>W = round(1000 × Σ(weight × min(value, cap) / cap))</code>: CPU 30% (8 cores), clock 15% (4 GHz), memory 20% (32 GB), storage 10% (256 GB), model 15% (10), API 10% (10). Schedulers do not score — W is 0.</p>
     </article>
     <article class="card">
-      <h3><i>4</i>Dispatch by difficulty</h3>
-      <p>A task carries difficulty <code>D</code> (0–1000, 0 = any). A scheduler only hands it to builders with <code>W ≥ D</code>, preferring the tightest fit so big machines are not held by small tasks.</p>
+      <h3><i>4</i>Dispatch: role, then difficulty</h3>
+      <p>A task carries difficulty <code>D</code> (0–1000, 0 = any). Business roles decide which builders may take it; inside that set a builder needs <code>W ≥ D</code>, and for the first 30 seconds an idle builder yields to a stronger idle peer in the same role. Across nodes, the parent prefers the child that is just capable enough.</p>
     </article>
     <article class="card">
       <h3><i>5</i>Aggregate upward</h3>

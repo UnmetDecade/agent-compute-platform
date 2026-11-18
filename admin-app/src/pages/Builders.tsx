@@ -115,7 +115,7 @@ function BuilderRow({ builder }: { builder: Instance }) {
           <Link className="strong" to={`/builders/${builder.id}`}>{builder.name}</Link>
           <Badge value={builder.state} />
           {builder.capability_score !== undefined && (
-            <Tag tone="accent" title={t("Work capacity: the scheduler picks builders by task difficulty")}>
+            <Tag tone="accent" title={t("Work capacity: gates task difficulty and prefers stronger idle builders inside the same business role")}>
               W {builder.capability_score}
             </Tag>
           )}
