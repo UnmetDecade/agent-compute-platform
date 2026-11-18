@@ -58,6 +58,9 @@ services:
       PCS_PORT: "7901"
       PCS_DATABASE_URL: postgres://platform:${POSTGRES_PASSWORD}@postgres:5432/platform_control
       PCS_ADMIN_ORIGINS: http://127.0.0.1:${DEMO_PORT:-18080},http://localhost:${DEMO_PORT:-18080}
+      # The demo has a single scheduler on the compose network; the admin app reaches
+      # it through the control plane's proxy, so PCS needs its address.
+      PCS_SCHEDULER_URL: http://scheduler:8443
       ADMIN_TOKEN_FILE: /run/demo/admin-token
       ADMIN_TOKEN_HOURS: ${ADMIN_TOKEN_HOURS:-720}
       # Demo-only: seeds admin/admin and lets the login page prefill it. The UI is
