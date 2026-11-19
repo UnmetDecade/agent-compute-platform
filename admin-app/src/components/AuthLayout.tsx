@@ -20,7 +20,7 @@ export function AuthLayout({
         <div className="auth-brand">
           <Icon name="shield" size={22} />
           <div>
-            <b>ITSS</b>
+            <b>ACP</b>
             <small>{t("AI agent compute floor")}</small>
           </div>
         </div>

@@ -1,6 +1,6 @@
 <div align="center">
 
-# Intelligent Task Scheduling System
+# Agent Compute Platform
 
 **Run Claude Code, Codex, DeepSeek or plain shell on any number of hosts — with deterministic scheduling, recursive schedulers, generic builders and allocation by operator-defined business role.**
 
@@ -18,9 +18,9 @@
 
 ---
 
-AI coding agents are easy to start and hard to operate across machines. The **Intelligent Task Scheduling System (ITSS)** keeps the operational core **boring and deterministic**: a scheduler decides, a generic builder executes, and an Agent only explains.
+AI coding agents are easy to start and hard to operate across machines. The **Agent Compute Platform (ACP)** keeps the operational core **boring and deterministic**: a scheduler decides, a generic builder executes, and an Agent only explains.
 
-The operator defines the **business roles** that do the work and writes the **allocation plan** as one prose document. ITSS compiles that plan **once on save** (with `POST /v1/plans/compile` available for preview) and matches every later request against the stored rules — never by asking a model at request time. All builders share one work tree, so the scheduler enforces **folder exclusion at claim time**: a workdir already held by another live lease is refused with `WORKDIR_IN_USE`.
+The operator defines the **business roles** that do the work and writes the **allocation plan** as one prose document. ACP compiles that plan **once on save** (with `POST /v1/plans/compile` available for preview) and matches every later request against the stored rules — never by asking a model at request time. All builders share one work tree, so the scheduler enforces **folder exclusion at claim time**: a workdir already held by another live lease is refused with `WORKDIR_IN_USE`.
 
 It is built for a small R&D team that wants a real compute floor — not a multi-tenant SaaS, not a Kubernetes distribution, and not another approval workflow.
 
@@ -79,7 +79,7 @@ Only the scheduler and development machines are built in. Everyone else is a sid
 
 ## Allocation by business role
 
-ITSS keeps the execution roles (scheduler, builder) and adds a second dimension of **business roles** (`ui-dev`, `code-review`, `test-bench`, …) that the operator defines and assigns. A builder starts with no business role; the operator assigns it at runtime.
+ACP keeps the execution roles (scheduler, builder) and adds a second dimension of **business roles** (`ui-dev`, `code-review`, `test-bench`, …) that the operator defines and assigns. A builder starts with no business role; the operator assigns it at runtime.
 
 - **Write the plan in plain language; matching stays deterministic** — each role gets one free-text note on how to do its work, and the whole allocation plan is a single prose box ("which requests go to whom, then to whom, what to refuse"). On save the scheduler compiles it **once** into rules and shows them for confirmation; every later request matches the stored rules (priority → specificity → declaration order), so the same request always routes the same way. No LLM infers routing at request time.
 - **Builders stay generic** — one image can serve any role. The role definition decides the capabilities, allowed paths and workdir, and only a builder assigned that role can claim the task.

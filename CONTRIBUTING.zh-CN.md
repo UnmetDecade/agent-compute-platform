@@ -1,8 +1,8 @@
-# 为智能任务调度系统（ITSS）贡献代码
+# 为Agent 算力平台（ACP）贡献代码
 
 > [English](CONTRIBUTING.md) · 简体中文
 
-感谢你愿意改进 Intelligent Task Scheduling System（ITSS，智能任务调度系统）。这是一个面向 AI 编程 Agent 的自托管算力与调度平台：调度机与构建机组成确定性的执行链路，并可以在其上按业务角色分配任务。聚焦、带测试的小改动最容易评审和合并。
+感谢你愿意改进 Agent Compute Platform（ACP，Agent 算力平台）。这是一个面向 AI 编程 Agent 的自托管算力与调度平台：调度机与构建机组成确定性的执行链路，并可以在其上按业务角色分配任务。聚焦、带测试的小改动最容易评审和合并。
 
 开始之前，请先阅读 [docs/architecture.zh-CN.md](docs/architecture.zh-CN.md) 和 [SECURITY.zh-CN.md](SECURITY.zh-CN.md)。这里的安全模型是有意为之：构建机以 root 运行，平台假设处于可信网络，PCS 永远不执行 Docker 命令。
 

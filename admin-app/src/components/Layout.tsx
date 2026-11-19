@@ -66,7 +66,7 @@ export function Layout() {
           <span className="brand-mark">
             <Icon name="bot" size={16} />
           </span>
-          <span className="brand-name">ITSS</span>
+          <span className="brand-name">ACP</span>
         </div>
 
         <nav>

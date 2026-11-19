@@ -3,7 +3,7 @@ import { scheduler } from "./client";
 
 /**
  * Business roles and allocation plans: the second scheduling dimension of this
- * Intelligent Task Scheduling System variant.
+ * Agent Compute Platform variant.
  *
  * The builder never declares a business role. The operator defines roles, assigns
  * them to already-registered builders, and authors the allocation plan the

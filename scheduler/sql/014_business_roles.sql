@@ -1,6 +1,6 @@
 -- 014 business roles and allocation plans
 --
--- ITSS has a single execution role for workers: role_id = 'builder'.
+-- ACP has a single execution role for workers: role_id = 'builder'.
 -- This variant adds a second dimension: business roles (ui-dev, driver-dev,
 -- code-review, test-bench, ...). They are configured by the operator and
 -- assigned to already-registered builders at runtime. The execution role and

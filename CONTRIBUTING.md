@@ -1,8 +1,8 @@
-# Contributing to Intelligent Task Scheduling System
+# Contributing to Agent Compute Platform
 
 > English · [Chinese](CONTRIBUTING.zh-CN.md)
 
-Thanks for taking the time to improve the Intelligent Task Scheduling System (ITSS). This project is a self-hosted, deterministic scheduler for AI coding agents, with generic builders and allocation by operator-defined business role. Small, focused changes with tests are the easiest to review and merge.
+Thanks for taking the time to improve the Agent Compute Platform (ACP). This project is a self-hosted, deterministic scheduler for AI coding agents, with generic builders and allocation by operator-defined business role. Small, focused changes with tests are the easiest to review and merge.
 
 Before you start, read [docs/architecture.md](docs/architecture.md) and [SECURITY.md](SECURITY.md). The security model is deliberate: builders run as root, the platform assumes a trusted network, and PCS never executes Docker commands.
 

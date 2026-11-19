@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible defect in the Intelligent Task Scheduling System (ITSS).
+description: Report a reproducible defect in the Agent Compute Platform (ACP).
 title: "[bug] "
 labels: ["bug"]
 body:

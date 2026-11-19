@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sideload Access Architecture · ITSS</title>
+<title>Sideload Access Architecture · ACP</title>
 <style>
   :root{
     color-scheme: light;
@@ -150,7 +150,7 @@
   <header>
     <div>
       <p class="eyebrow">Architecture overview · sideload access model</p>
-      <h1>Intelligent Task Scheduling System · Sideload Access</h1>
+      <h1>Agent Compute Platform · Sideload Access</h1>
       <p class="lede">The platform has exactly two built-in roles: the <b>scheduler</b> (control plane) and the <b>development machine</b> (execution plane). Developers, testers and every other system are not containers or registered instances — they hold a <b>sideload token</b> (<code>sdl_…</code>) and call <b>device → control plane → this host's root scheduler → development machine</b>. A device only talks to the control plane: it never learns the scheduler address and holds no instance credential. A sideload has no heartbeat and takes no lease, and its permissions are a closed scope set.</p>
     </div>
     <div class="head-actions">
@@ -160,7 +160,7 @@
   </header>
 
   <div class="canvas">
-    <svg viewBox="0 0 1480 690" role="img" aria-label="ITSS sideload access architecture">
+    <svg viewBox="0 0 1480 690" role="img" aria-label="ACP sideload access architecture">
       <defs>
         <marker id="ar-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
           <path d="M0 0 L10 5 L0 10 z" fill="var(--edge)"/>

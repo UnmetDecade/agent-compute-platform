@@ -2,7 +2,7 @@
 
 > [English](CHANGELOG.md) · 简体中文
 
-这里记录智能任务调度系统（ITSS，Intelligent Task Scheduling System）的重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/)。
+这里记录 Agent 算力平台（ACP，Agent Compute Platform）的重要变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/)。
 
 ## 未发布
 
@@ -13,7 +13,8 @@
 
 ### 变更
 
-- 产品统一更名为智能任务调度系统（ITSS，Intelligent Task Scheduling System），README、文档、管理界面和部署资产同步更新，移除了上游 OSACP 的徽章与链接。
+- 产品更名为 Agent 算力平台（ACP，Agent Compute Platform），仓库地址为 <https://github.com/UnmetDecade/agent-compute-platform>；README、文档、管理界面、架构图和 issue 模板同步更新。以下历史条目保留其发布时的名称。
+- 本发布周期内曾短暂使用智能任务调度系统（ITSS）作为产品名，期间移除了上游 OSACP 的徽章与链接。
 - 全部源码、注释、调度机消息、SQL 注释和测试夹具改为英文。
 - 管理界面的 i18n 改为以英文为源 key、中文翻译表提供中文显示；中文仍是可选界面语言，中文文档集合保留。
 

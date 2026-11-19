@@ -13,7 +13,7 @@ import type { PlanDocument } from "./plans.js";
  * compiler cannot produce a valid document, nothing is saved.
  */
 
-const SYSTEM_PROMPT = `You are the "allocation plan compiler" of the Intelligent Task Scheduling System scheduler. An operator uses natural language to describe how tasks in a project should be allocated.
+const SYSTEM_PROMPT = `You are the "allocation plan compiler" of the Agent Compute Platform scheduler. An operator uses natural language to describe how tasks in a project should be allocated.
 Your only job is to translate that description into the rule JSON that the scheduler executes.
 
 Rule document structure:

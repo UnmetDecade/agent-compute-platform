@@ -2,7 +2,7 @@
 
 > English · [Chinese](CHANGELOG.zh-CN.md)
 
-All notable changes to the Intelligent Task Scheduling System (ITSS) are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/).
+All notable changes to the Agent Compute Platform (ACP) are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
@@ -13,7 +13,8 @@ All notable changes to the Intelligent Task Scheduling System (ITSS) are recorde
 
 ### Changed
 
-- The product is now branded **Intelligent Task Scheduling System (ITSS)** throughout the README, documentation, admin UI and deployment assets; upstream OSACP links and badges were removed.
+- The product is renamed **Agent Compute Platform (ACP)**, with the repository at <https://github.com/UnmetDecade/agent-compute-platform>; the README, documentation, admin UI, diagrams and issue templates were updated. Entries below keep the name they were released under.
+- The product was briefly branded **Intelligent Task Scheduling System (ITSS)** during this release cycle; upstream OSACP links and badges were removed at the same time.
 - All source code, comments, scheduler messages, SQL comments and test fixtures are written in English.
 - The admin app's i18n layer uses English as the source key, with a Chinese translation map; Chinese remains a selectable UI language, and the Chinese documentation set is kept.
 

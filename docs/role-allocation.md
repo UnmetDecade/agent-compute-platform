@@ -1,6 +1,6 @@
 # Role-based allocation
 
-The Intelligent Task Scheduling System (ITSS) keeps its execution model — scheduler, builder, leases, fencing,
+The Agent Compute Platform (ACP) keeps its execution model — scheduler, builder, leases, fencing,
 artifacts, workflows — and replaces "dispatch by task type" with **allocation by
 business role**. The operator defines the roles, assigns them to registered
 builders, and publishes a plan. The scheduler then routes each request by those
@@ -56,7 +56,7 @@ The words are for re-editing and auditing; the rules are what runs.
 
 One plan may be `ACTIVE` per project. Activating a plan compiles every rule into
 a `workflow_templates` row (`plan.<plan_id>.<rule_id>`), so a request starts the
-same workflow state machine that any other ITSS workflow uses.
+same workflow state machine that any other ACP workflow uses.
 
 ## Plan document
 

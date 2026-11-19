@@ -3,7 +3,7 @@ import { q, q1, tx } from "../db.js";
 import { ApiError } from "../errors.js";
 
 /**
- * Business roles: the second role dimension used by this Intelligent Task Scheduling System variant.
+ * Business roles: the second role dimension used by this Agent Compute Platform variant.
  *
  * Execution roles stay scheduler | builder. Business roles (ui-dev, driver-dev,
  * code-review, test-bench, ...) are operator-defined and operator-assigned to
